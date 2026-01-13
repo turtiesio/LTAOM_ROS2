@@ -3,7 +3,9 @@
 
 #include "predefined_types.h"
 
-#include <nav_msgs/Odometry.h>
+#include <nav_msgs/msg/odometry.hpp>
+#include <geometry_msgs/msg/pose.hpp>
+#include <geometry_msgs/msg/pose_with_covariance.hpp>
 
 #include <pcl/filters/voxel_grid.h>
 #include <pcl/sample_consensus/ransac.h>
@@ -11,7 +13,8 @@
 #include <pcl/registration/icp.h>
 
 #include <gtsam/geometry/Pose3.h>
-#include <tf/tf.h>
+#include <tf2/LinearMath/Quaternion.h>
+#include <tf2/LinearMath/Matrix3x3.h>
 
 bool GetOneLineAndSplitByComma(std::istream& fptr, std::vector<std::string> &out_str)
 {
@@ -55,7 +58,7 @@ Eigen::Matrix3d QuatToRotM(double w, double x, double y, double z){
       2*(x*z - w*y),   2*(y*z + w*x), 1 - 2*(x*x + y*y);
   return R;
 }
-Pose6D OdomMsgToPose6D(const nav_msgs::Odometry::ConstPtr &odom_msg)
+Pose6D OdomMsgToPose6D(const nav_msgs::msg::Odometry::SharedPtr &odom_msg)
 {
   auto x = odom_msg->pose.pose.position.x;
   auto y = odom_msg->pose.pose.position.y;
@@ -65,10 +68,10 @@ Pose6D OdomMsgToPose6D(const nav_msgs::Odometry::ConstPtr &odom_msg)
   auto qz = odom_msg->pose.pose.orientation.z;
   auto qw = odom_msg->pose.pose.orientation.w;
   double roll, pitch, yaw;
-  tf::Matrix3x3(tf::Quaternion(qx, qy, qz, qw)).getRPY(roll, pitch, yaw);
+  tf2::Matrix3x3(tf2::Quaternion(qx, qy, qz, qw)).getRPY(roll, pitch, yaw);
   return Pose6D{x, y, z, roll, pitch, yaw};
 }
-gtsam::Pose3 GeoPoseMsgToGTSPose(const geometry_msgs::Pose& pose)
+gtsam::Pose3 GeoPoseMsgToGTSPose(const geometry_msgs::msg::Pose& pose)
 {
   auto x = pose.position.x;
   auto y = pose.position.y;
@@ -78,7 +81,7 @@ gtsam::Pose3 GeoPoseMsgToGTSPose(const geometry_msgs::Pose& pose)
   auto qz = pose.orientation.z;
   auto qw = pose.orientation.w;
   double roll, pitch, yaw;
-  tf::Matrix3x3(tf::Quaternion(qx, qy, qz, qw)).getRPY(roll, pitch, yaw);
+  tf2::Matrix3x3(tf2::Quaternion(qx, qy, qz, qw)).getRPY(roll, pitch, yaw);
   return gtsam::Pose3(gtsam::Rot3::RzRyRx(roll, pitch, yaw), gtsam::Point3(x, y, z));
 }
 gtsam::Pose3 Pose6DToGTSPose(const Pose6D& p)
@@ -88,9 +91,9 @@ gtsam::Pose3 Pose6DToGTSPose(const Pose6D& p)
 void Pose6DToEigenRT(const Pose6D& p, gtsam::Matrix3 &R, gtsam::Vector3 &t)
 {
   R = gtsam::Rot3::RzRyRx(p.roll, p.pitch, p.yaw).matrix();
-  t = gtsam::Point3(p.x, p.y, p.z).vector();
+  t = gtsam::Point3(p.x, p.y, p.z);  // Point3 is already Eigen::Vector3d
 }
-Eigen::Matrix4f GeoPoseMsgToEigenM4f(const geometry_msgs::PoseWithCovarianceConstPtr& lc_msg){
+Eigen::Matrix4f GeoPoseMsgToEigenM4f(const geometry_msgs::msg::PoseWithCovariance::SharedPtr& lc_msg){
   auto x = lc_msg->pose.position.x;
   auto y = lc_msg->pose.position.y;
   auto z = lc_msg->pose.position.z;

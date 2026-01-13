@@ -4,9 +4,11 @@
 #include "ikd-Tree/ikd_Tree.h"
 #include "use-ikfom.hpp"
 
-#include <ros/ros.h>
-#include <std_msgs/Float32MultiArray.h>
-#include <visualization_msgs/MarkerArray.h>
+#include <rclcpp/rclcpp.hpp>
+#include <std_msgs/msg/float32_multi_array.hpp>
+#include <visualization_msgs/msg/marker_array.hpp>
+#include <geometry_msgs/msg/pose.hpp>
+#include <geometry_msgs/msg/quaternion.hpp>
 #include <pcl/registration/icp.h>
 
 #include <unordered_map>
@@ -101,7 +103,8 @@ public:
 
 namespace ExtraLib {
 
-void pubCorrectionIds(const ros::Publisher &pub_handle, const V3D &pos, const int id);
+void pubCorrectionIds(const rclcpp::Publisher<visualization_msgs::msg::MarkerArray>::SharedPtr &pub_handle,
+                      const rclcpp::Clock::SharedPtr &clock, const V3D &pos, const int id);
 
 bool GetOneLineAndSplitByComma(std::istream& fptr, std::vector<std::string> &out_str);
 
@@ -117,13 +120,13 @@ bool GetOneLineAndSplitByComma(std::istream& fptr, std::vector<std::string> &out
 
 V3D esti_center(const PointVector &point_near);
 
-void eigenRtToPoseMsg(const M3D &R, const V3D &t, geometry_msgs::Pose &out);
+void eigenRtToPoseMsg(const M3D &R, const V3D &t, geometry_msgs::msg::Pose &out);
 
 M3D eulToRotM(double roll, double pitch, double yaw);
 
-void poseMsgToEigenRT(const geometry_msgs::Pose &m, M3D &R, V3D &t);
+void poseMsgToEigenRT(const geometry_msgs::msg::Pose &m, M3D &R, V3D &t);
 
-V3D geometryOrientationToRPY(const geometry_msgs::Quaternion pose_in);
+V3D geometryOrientationToRPY(const geometry_msgs::msg::Quaternion &pose_in);
 
 void printInfo(std::unordered_map<int, SubmapInfo> &unmap_submap_info, ostream& fout_dbg);
 

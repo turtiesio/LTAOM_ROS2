@@ -1,12 +1,10 @@
 #include "include/std_ba.h"
 #include "include/std.h"
 #include "include/std_pgo.h"
-#include <nav_msgs/Odometry.h>
+#include <nav_msgs/msg/odometry.hpp>
 #include <pcl_conversions/pcl_conversions.h>
-#include <ros/ros.h>
-#include <rosbag/bag.h>
-#include <rosbag/view.h>
-#include <sensor_msgs/PointCloud2.h>
+#include <rclcpp/rclcpp.hpp>
+#include <sensor_msgs/msg/point_cloud2.hpp>
 
 void geometric_icp(
     const pcl::PointCloud<pcl::PointXYZINormal>::Ptr &cloud,
@@ -25,15 +23,12 @@ void geometric_icp(
   }
   kd_tree->setInputCloud(input_cloud);
   Eigen::Quaterniond q(rot.cast<double>());
-//  ceres::Manifold *quaternion_manifold = new ceres::EigenQuaternionManifold;
-  ceres::LocalParameterization *q_parameterization =
-      new ceres::EigenQuaternionParameterization();
+  ceres::Manifold *quaternion_manifold = new ceres::EigenQuaternionManifold;
   ceres::Problem problem;
   ceres::LossFunction *loss_function = nullptr; // new ceres::HuberLoss(0.1);
   double para_q[4] = {q.x(), q.y(), q.z(), q.w()};
   double para_t[3] = {t(0), t(1), t(2)};
-//  problem.AddParameterBlock(para_q, 4, quaternion_manifold);
-  problem.AddParameterBlock(para_q, 4, q_parameterization);
+  problem.AddParameterBlock(para_q, 4, quaternion_manifold);
   problem.AddParameterBlock(para_t, 3);
   Eigen::Map<Eigen::Quaterniond> q_last_curr(para_q);
   Eigen::Map<Eigen::Vector3d> t_last_curr(para_t);

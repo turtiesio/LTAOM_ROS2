@@ -5,7 +5,7 @@
 #include <Eigen/StdVector>
 #include <ceres/ceres.h>
 #include <ceres/rotation.h>
-#include <cv_bridge/cv_bridge.h>
+#include <cv_bridge/cv_bridge.hpp>
 #include <execution>
 #include <fstream>
 #include <mutex>
@@ -14,13 +14,15 @@
 #include <opencv2/core/core.hpp>
 #include <pcl/common/io.h>
 #include <pcl/kdtree/kdtree_flann.h>
-#include <ros/ros.h>
+#include <rclcpp/rclcpp.hpp>
 #include <sstream>
 #include <stdio.h>
 #include <string>
 #include <unordered_map>
-#include <visualization_msgs/Marker.h>
-#include <visualization_msgs/MarkerArray.h>
+#include <visualization_msgs/msg/marker.hpp>
+#include <visualization_msgs/msg/marker_array.hpp>
+#include <geometry_msgs/msg/quaternion.hpp>
+#include <geometry_msgs/msg/point.hpp>
 #include <vector>
 
 #define HASH_P 116101
@@ -368,15 +370,15 @@ void add_STD(std::unordered_map<STD_LOC, std::vector<STD>> &descriptor_map,
              std::vector<STD> &STD_list);
 
 void publish_std(const std::vector<std::pair<STD, STD>> &match_std_list,
-                 const ros::Publisher &std_publisher);
+                 const rclcpp::Publisher<visualization_msgs::msg::MarkerArray>::SharedPtr &std_publisher);
 
 void publish_std_list(const std::vector<STD> &std_list,
-                      const ros::Publisher &std_publisher);
+                      const rclcpp::Publisher<visualization_msgs::msg::MarkerArray>::SharedPtr &std_publisher);
 
 void publish_binary(const std::vector<BinaryDescriptor> &binary_list,
                     const Eigen::Vector3d &text_color,
                     const std::string &text_ns,
-                    const ros::Publisher &text_publisher);
+                    const rclcpp::Publisher<visualization_msgs::msg::MarkerArray>::SharedPtr &text_publisher);
 
 double
 calc_triangle_dis(const std::vector<std::pair<STD, STD>> &match_std_list);
@@ -392,9 +394,9 @@ double calc_overlap(const pcl::PointCloud<pcl::PointXYZI>::Ptr &cloud1,
                     double dis_threshold, int skip_num);
 
 void CalcQuation(const Eigen::Vector3d &vec, const int axis,
-                 geometry_msgs::Quaternion &q);
+                 geometry_msgs::msg::Quaternion &q);
 
-void pubPlane(const ros::Publisher &plane_pub, const std::string plane_ns,
+void pubPlane(const rclcpp::Publisher<visualization_msgs::msg::Marker>::SharedPtr &plane_pub, const std::string plane_ns,
               const int plane_id, const pcl::PointXYZINormal normal_p,
               const float radius, const Eigen::Vector3d rgb);
 

@@ -6,9 +6,14 @@
 #include <pcl/point_cloud.h>
 #include <pcl/point_types.h>
 
-#include <ros/ros.h>
+#include <builtin_interfaces/msg/time.hpp>
 
 #include <vector>
+
+// Helper function to convert builtin_interfaces::msg::Time to nanoseconds
+inline uint64_t timeToNSec(const builtin_interfaces::msg::Time& t) {
+    return static_cast<uint64_t>(t.sec) * 1000000000ULL + static_cast<uint64_t>(t.nanosec);
+}
 
 class KeyFrame
 {
@@ -23,7 +28,7 @@ public:
   Pose6D KeyPoseOpt;
   Pose6D KeyPoseCompare;
   bool pose_opt_set;
-  ros::Time KeyTime;
+  builtin_interfaces::msg::Time KeyTime;
   pcl::PointCloud<PointType>::Ptr KeyCloud;
 
 private:

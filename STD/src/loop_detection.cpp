@@ -49,30 +49,47 @@ Dr. Fu Zhang < fuzhang@hku.hk >.
 
 #include <condition_variable>
 #include <mutex>
-#include <nav_msgs/Odometry.h>
+#include <rclcpp/rclcpp.hpp>
+#include <builtin_interfaces/msg/time.hpp>
+#include <nav_msgs/msg/odometry.hpp>
 #include <pcl_conversions/pcl_conversions.h>
-#include <sensor_msgs/PointCloud2.h>
+#include <sensor_msgs/msg/point_cloud2.hpp>
 #include <deque>
 #include <vector>
 #include <string>
-#include <std_msgs/Float32MultiArray.h>
-#include <std_msgs/UInt64.h>
-#include <std_msgs/Int32.h>
-#include <geometry_msgs/PoseStamped.h>
+#include <std_msgs/msg/float32_multi_array.hpp>
+#include <std_msgs/msg/u_int64.hpp>
+#include <std_msgs/msg/int32.hpp>
+#include <geometry_msgs/msg/pose_stamped.hpp>
+#include <geometry_msgs/msg/pose_with_covariance.hpp>
+#include <visualization_msgs/msg/marker.hpp>
+#include <visualization_msgs/msg/marker_array.hpp>
 
 #include <thread>
 
 #define for_pgo
-#define as_node
+// #define as_node  // Comment out for standalone executable, define for component/nodelet use
+
+// Helper functions for ROS2 time conversion
+inline double toSec(const builtin_interfaces::msg::Time& t) {
+  return static_cast<double>(t.sec) + static_cast<double>(t.nanosec) * 1e-9;
+}
+
+inline uint64_t toNSec(const builtin_interfaces::msg::Time& t) {
+  return static_cast<uint64_t>(t.sec) * 1000000000ULL + static_cast<uint64_t>(t.nanosec);
+}
 
 bool flg_exit = false;
 
-std::deque<ros::Time> time_buf;
-std::deque<pcl::PointCloud<pcl::PointXYZI>::Ptr> lidar_buf;
-std::map<uint64_t, nav_msgs::Odometry::ConstPtr> odom_buf;
+// Global node pointer
+rclcpp::Node::SharedPtr g_node = nullptr;
 
-geometry_msgs::Pose current_pose;
-geometry_msgs::Pose last_pose;
+std::deque<builtin_interfaces::msg::Time> time_buf;
+std::deque<pcl::PointCloud<pcl::PointXYZI>::Ptr> lidar_buf;
+std::map<uint64_t, nav_msgs::msg::Odometry::SharedPtr> odom_buf;
+
+geometry_msgs::msg::Pose current_pose;
+geometry_msgs::msg::Pose last_pose;
 double position_threshold = 0.2;
 double rotation_threshold = DEG2RAD(5);
 bool is_sub_msg = false;
@@ -97,15 +114,21 @@ pcl::PointCloud<pcl::PointXYZINormal>::Ptr corners_curr_ (new pcl::PointCloud<pc
 bool stop_accumulation = false;
 std::fstream time_lcd_file;
 
-ros::Publisher pubRegisterCloud,pubCurrentCloud,pubCurrentBinary,
-               pubMatchedCloud,pubMatchedBinary,pubSTD;
+rclcpp::Publisher<sensor_msgs::msg::PointCloud2>::SharedPtr pubRegisterCloud, pubCurrentCloud, pubCurrentBinary,
+               pubMatchedCloud, pubMatchedBinary;
+rclcpp::Publisher<visualization_msgs::msg::MarkerArray>::SharedPtr pubSTD;
 
-ros::Publisher submap_pose_pub, submap_cloud_body_pub, submap_id_pub,
-               lc_tranform_pub, des_pub1, des_pub2, inter_triangle_pub,
-               inter2_triangle_pub, lc_triangle_pub, lc_onprior_id_pub, line_pub;
+rclcpp::Publisher<nav_msgs::msg::Odometry>::SharedPtr submap_pose_pub;
+rclcpp::Publisher<sensor_msgs::msg::PointCloud2>::SharedPtr submap_cloud_body_pub;
+rclcpp::Publisher<std_msgs::msg::Int32>::SharedPtr submap_id_pub;
+rclcpp::Publisher<geometry_msgs::msg::PoseWithCovariance>::SharedPtr lc_tranform_pub;
+rclcpp::Publisher<visualization_msgs::msg::Marker>::SharedPtr des_pub1, des_pub2;
+rclcpp::Publisher<sensor_msgs::msg::PointCloud2>::SharedPtr inter_triangle_pub, inter2_triangle_pub, lc_triangle_pub;
+rclcpp::Publisher<std_msgs::msg::Int32>::SharedPtr lc_onprior_id_pub;
+rclcpp::Publisher<visualization_msgs::msg::Marker>::SharedPtr line_pub;
 
 
-void notificationCallback(const std_msgs::Float32MultiArray::ConstPtr &msg)
+void notificationCallback(const std_msgs::msg::Float32MultiArray::SharedPtr msg)
 {
   debug_file << "stop_accumulation = true" << std::endl;
   if (msg->data[0] == 1)
@@ -115,15 +138,15 @@ void notificationCallback(const std_msgs::Float32MultiArray::ConstPtr &msg)
 }
 
 uint64_t jump_time = 0;
-void jumptimeCallback(const std_msgs::UInt64::ConstPtr &msg)
+void jumptimeCallback(const std_msgs::msg::UInt64::SharedPtr msg)
 {
   jump_time = msg->data;
 }
 
 bool VertexDisSort(std::tuple<STD,STD,float> a, std::tuple<STD,STD,float> b) { return (std::get<2>(a) < std::get<2>(b)); }
 
-void pub_corners_pairs(ros::Publisher &handler3, const int frame_last, const int frame_curr,
-                     const std::vector<std::pair<pcl::PointXYZINormal,pcl::PointXYZINormal>> &corners_pairs, const ros::Time& time_submap_local){
+void pub_corners_pairs(const rclcpp::Publisher<sensor_msgs::msg::PointCloud2>::SharedPtr &handler3, const int frame_last, const int frame_curr,
+                     const std::vector<std::pair<pcl::PointXYZINormal,pcl::PointXYZINormal>> &corners_pairs, const builtin_interfaces::msg::Time& time_submap_local){
   pcl::PointCloud<pcl::PointXYZINormal>::Ptr corners_cloud(
       new pcl::PointCloud<pcl::PointXYZINormal>);
   if (corners_pairs.empty()){
@@ -150,27 +173,27 @@ void pub_corners_pairs(ros::Publisher &handler3, const int frame_last, const int
   corners_cloud->height = 1;
   corners_cloud->width = corners_cloud->size();
   debug_file << frame_last << " " << frame_curr << " " << corners_cloud->size() << std::endl;
-  sensor_msgs::PointCloud2 pub_cloud;
+  sensor_msgs::msg::PointCloud2 pub_cloud;
   pcl::toROSMsg(*corners_cloud, pub_cloud);
   pub_cloud.header.frame_id = "camera_init";
   pub_cloud.header.stamp = time_submap_local;
-  handler3.publish(pub_cloud);
+  handler3->publish(pub_cloud);
 
 }
 
-void pub_descriptors(ros::Publisher &handler1, ros::Publisher &handler2, ros::Publisher &handler3,
+void pub_descriptors(rclcpp::Publisher<visualization_msgs::msg::Marker>::SharedPtr &handler1, rclcpp::Publisher<visualization_msgs::msg::Marker>::SharedPtr &handler2, rclcpp::Publisher<sensor_msgs::msg::PointCloud2>::SharedPtr &handler3,
                      const std::vector<std::tuple<STD,STD,float>> &descriptor_pairs,
-                     const ros::Time& time_submap_local, bool on_prior){
+                     const builtin_interfaces::msg::Time& time_submap_local, bool on_prior){
   if (descriptor_pairs.empty())
     return;
-  visualization_msgs::Marker lines_;
-  lines_.header.stamp = ros::Time::now();
+  visualization_msgs::msg::Marker lines_;
+  lines_.header.stamp = g_node->now();
   lines_.header.frame_id = "camera_init";
   lines_.ns = "association_lines";
-  lines_.action = visualization_msgs::Marker::ADD;
+  lines_.action = visualization_msgs::msg::Marker::ADD;
   lines_.pose.orientation.w = 1.0f;
   lines_.id = 1;
-  lines_.type = visualization_msgs::Marker::LINE_LIST;
+  lines_.type = visualization_msgs::msg::Marker::LINE_LIST;
   lines_.scale.x = 0.3;
   lines_.color.r = 0.0f;
   lines_.color.g = 1.0f;
@@ -182,7 +205,7 @@ void pub_descriptors(ros::Publisher &handler1, ros::Publisher &handler2, ros::Pu
       new pcl::PointCloud<pcl::PointXYZI>);
   pcl::PointCloud<pcl::PointXYZI>::Ptr corners_curr(
         new pcl::PointCloud<pcl::PointXYZI>);
-  geometry_msgs::Point point_a, point_b;
+  geometry_msgs::msg::Point point_a, point_b;
   pcl::PointXYZI pi;
   int count = 0;
   int k = 6;
@@ -238,14 +261,14 @@ void pub_descriptors(ros::Publisher &handler1, ros::Publisher &handler2, ros::Pu
     lines_.points.push_back(point_b);
   }
 
-  visualization_msgs::Marker lines_2;
-  lines_2.header.stamp = ros::Time::now();
+  visualization_msgs::msg::Marker lines_2;
+  lines_2.header.stamp = g_node->now();
   lines_2.header.frame_id = "camera_init";
   lines_2.ns = "association_lines";
-  lines_2.action = visualization_msgs::Marker::ADD;
+  lines_2.action = visualization_msgs::msg::Marker::ADD;
   lines_2.pose.orientation.w = 1.0f;
   lines_2.id = 1;
-  lines_2.type = visualization_msgs::Marker::LINE_LIST;
+  lines_2.type = visualization_msgs::msg::Marker::LINE_LIST;
   lines_2.scale.x = 0.3;
   lines_2.color.r = 0.0f;
   lines_2.color.g = 0.0f;
@@ -303,19 +326,19 @@ void pub_descriptors(ros::Publisher &handler1, ros::Publisher &handler2, ros::Pu
     lines_2.points.push_back(point_a);
     lines_2.points.push_back(point_b);
   }
-  handler1.publish(lines_);
-  handler2.publish(lines_2);
+  handler1->publish(lines_);
+  handler2->publish(lines_2);
   corners_cloud->points[0].intensity = on_prior?-(std::get<1>(descriptor_pairs[0]).frame_number_+1):\
     std::get<1>(descriptor_pairs[0]).frame_number_;
   corners_cloud->points[1].intensity = std::get<0>(descriptor_pairs[0]).frame_number_;
   corners_cloud->height = 1;
   corners_cloud->width = corners_cloud->size();
   debug_file << corners_cloud->points[0].intensity << " " << corners_cloud->points[1].intensity << " " << corners_cloud->size() << std::endl;
-  sensor_msgs::PointCloud2 pub_cloud;
+  sensor_msgs::msg::PointCloud2 pub_cloud;
   pcl::toROSMsg(*corners_cloud, pub_cloud);
   pub_cloud.header.frame_id = "camera_init";
   pub_cloud.header.stamp = time_submap_local;
-  handler3.publish(pub_cloud);
+  handler3->publish(pub_cloud);
 }
 
 void associate_consecutive_frames(pcl::PointCloud<pcl::PointXYZINormal>::Ptr &corners_curr, pcl::PointCloud<pcl::PointXYZINormal>::Ptr &corners_last,
@@ -354,16 +377,16 @@ void associate_consecutive_frames(pcl::PointCloud<pcl::PointXYZINormal>::Ptr &co
 
 void SigHandle(int sig) {
   flg_exit = true;
-  ROS_WARN("catch sig %d", sig);
+  RCLCPP_WARN(g_node->get_logger(), "catch sig %d", sig);
   sig_buffer.notify_all();
 }
 
-void pointCloudCallBack(const sensor_msgs::PointCloud2::ConstPtr &msg) {
-//  debug_file << "lidar msg time" << msg->header.stamp.toNSec() << std::endl;
+void pointCloudCallBack(const sensor_msgs::msg::PointCloud2::SharedPtr msg) {
+//  debug_file << "lidar msg time" << toNSec(msg->header.stamp) << std::endl;
   mtx_buffer.lock();
   scan_count++;
-  if (msg->header.stamp.toSec() < last_lidar_msgtime) {
-    ROS_ERROR("lidar loop back, clear buffer");
+  if (toSec(msg->header.stamp) < last_lidar_msgtime) {
+    RCLCPP_ERROR(g_node->get_logger(), "lidar loop back, clear buffer");
     lidar_buf.clear();
   }
   // PointCloudXYZI::Ptr ptr(new PointCloudXYZI());
@@ -372,14 +395,14 @@ void pointCloudCallBack(const sensor_msgs::PointCloud2::ConstPtr &msg) {
   pcl::fromROSMsg(*msg, *ptr);
   lidar_buf.push_back(ptr);
   time_buf.push_back(msg->header.stamp);
-  last_lidar_msgtime = msg->header.stamp.toSec();
+  last_lidar_msgtime = toSec(msg->header.stamp);
   mtx_buffer.unlock();
   sig_buffer.notify_all();
 }
 
-void odomCallBack(const nav_msgs::Odometry::ConstPtr &msg) {
-//  debug_file << "odom msg time" << msg->header.stamp.toNSec() << std::endl;
-  odom_buf[msg->header.stamp.toNSec()] = msg;
+void odomCallBack(const nav_msgs::msg::Odometry::SharedPtr msg) {
+//  debug_file << "odom msg time" << toNSec(msg->header.stamp) << std::endl;
+  odom_buf[toNSec(msg->header.stamp)] = msg;
 }
 
 void load_prior_descriptor(std::unordered_map<STD_LOC, std::vector<STD>> &descriptor_map_prior,
@@ -424,7 +447,7 @@ bool detect_loopclosure( int & lc_his_id, std::vector<STD> &STD_list,
                          std::vector<pcl::PointCloud<pcl::PointXYZINormal>::Ptr> &history_plane_list,
                          std::vector<pcl::PointCloud<pcl::PointXYZI>::Ptr> &key_cloud_list,
                          int &key_frame_id, ConfigSetting &config_setting, std::fstream &debug_file,
-                         ros::Rate &loop, ros::Time &time_submap_local, bool on_prior)
+                         rclcpp::Rate &loop, builtin_interfaces::msg::Time &time_submap_local, bool on_prior)
 {
     auto start2 = std::chrono::system_clock::now();
     auto t_candidate_search_begin = std::chrono::high_resolution_clock::now();
@@ -545,7 +568,7 @@ bool detect_loopclosure( int & lc_his_id, std::vector<STD> &STD_list,
       }
 
       Eigen::Quaterniond q_opt(loop_rotation.cast<double>());
-      geometry_msgs::PoseWithCovariance transform_msg;
+      geometry_msgs::msg::PoseWithCovariance transform_msg;
       transform_msg.pose.position.x = loop_translation[0];
       transform_msg.pose.position.y = loop_translation[1];
       transform_msg.pose.position.z = loop_translation[2];
@@ -555,7 +578,7 @@ bool detect_loopclosure( int & lc_his_id, std::vector<STD> &STD_list,
       transform_msg.pose.orientation.w = q_opt.w();
       transform_msg.covariance[0] = key_frame_id;
       transform_msg.covariance[1] = on_prior?-(match_frame+1):match_frame;
-      lc_tranform_pub.publish(transform_msg);
+      lc_tranform_pub->publish(transform_msg);
 
       std::sort(descriptor_pairs.begin(), descriptor_pairs.end(), VertexDisSort);
 
@@ -576,10 +599,10 @@ bool detect_loopclosure( int & lc_his_id, std::vector<STD> &STD_list,
 
       if (!on_prior)
       {
-        sensor_msgs::PointCloud2 pub_cloud;
+        sensor_msgs::msg::PointCloud2 pub_cloud;
         pcl::toROSMsg(*key_cloud_list[match_frame], pub_cloud);
         pub_cloud.header.frame_id = "camera_init";
-        pubMatchedCloud.publish(pub_cloud);
+        pubMatchedCloud->publish(pub_cloud);
         loop.sleep();
         pcl::PointCloud<pcl::PointXYZ> matched_key_points_cloud;
         for (auto var : history_binary_list[match_frame]) {
@@ -591,10 +614,9 @@ bool detect_loopclosure( int & lc_his_id, std::vector<STD> &STD_list,
         }
         pcl::toROSMsg(matched_key_points_cloud, pub_cloud);
         pub_cloud.header.frame_id = "camera_init";
-        pubMatchedBinary.publish(pub_cloud);
+        pubMatchedBinary->publish(pub_cloud);
         Eigen::Vector3d color2(0, 1, 0);
-        publish_binary(history_binary_list[match_frame], color2, "history",
-                       pubSTD);
+        publish_binary(history_binary_list[match_frame], color2, "history", pubSTD);
         loop.sleep();
       }
       debug_file << "1 ";
@@ -615,7 +637,7 @@ bool detect_loopclosure( int & lc_his_id, std::vector<STD> &STD_list,
       }
             debug_file << "2 ";
       publish_std(sucess_match_list_publish, pubSTD);
-      nav_msgs::Odometry odom;
+      nav_msgs::msg::Odometry odom;
       odom.header.frame_id = "camera_init";
       odom.pose.pose.position.x = loop_translation[0];
       odom.pose.pose.position.y = loop_translation[1];
@@ -637,14 +659,14 @@ bool detect_loopclosure( int & lc_his_id, std::vector<STD> &STD_list,
 }
 
 #ifdef as_node
-int mainLCFunction()
+int mainLCFunction(rclcpp::Node::SharedPtr node)
 {
-  int argc; char** argv;
-  ros::init(argc, argv, "planer_test");
+  g_node = node;
   sleep(2); // make this node launch after LO node
-  ros::NodeHandle nh;
-  std::string config_file  = "config.yaml";
-  if (nh.getParam("/lcd_config_path", config_file))
+
+  node->declare_parameter<std::string>("lcd_config_path", "config.yaml");
+  std::string config_file = node->get_parameter("lcd_config_path").as_string();
+  if (!config_file.empty())
     std::cout << "Succeed in geting loop detection config file!" << std::endl;
   else
   {
@@ -653,10 +675,13 @@ int mainLCFunction()
   }
 #else
 int main(int argc, char **argv) {
-  ros::init(argc, argv, "planer_test");
-  ros::NodeHandle nh;
-  std::string config_file = "";
-  if (nh.getParam("/lcd_config_path", config_file))
+  rclcpp::init(argc, argv);
+  auto node = std::make_shared<rclcpp::Node>("loop_detection");
+  g_node = node;
+
+  node->declare_parameter<std::string>("lcd_config_path", "");
+  std::string config_file = node->get_parameter("lcd_config_path").as_string();
+  if (!config_file.empty())
     std::cout << "Succeed in geting loop detection config file!" << std::endl;
   else
   {
@@ -664,34 +689,40 @@ int main(int argc, char **argv) {
     exit(-1);
   }
 #endif
-  nh.param<int>("multisession_mode",multisession_mode, 0);
-  nh.param<std::string>("SaveDir",save_directory,"");
+  node->declare_parameter<int>("multisession_mode", 0);
+  node->declare_parameter<std::string>("SaveDir", "");
+  multisession_mode = node->get_parameter("multisession_mode").as_int();
+  save_directory = node->get_parameter("SaveDir").as_string();
 
   ConfigSetting config_setting;
   load_config_setting(config_file, config_setting);
   std::cout << "waiting for point cloud data!" << std::endl;
 
-  ros::Subscriber sub_cloud = nh.subscribe("/cloud_registered", 1000, pointCloudCallBack);
-  ros::Subscriber sub_odom = nh.subscribe("/aft_mapped_to_init", 1000, odomCallBack);
+  auto sub_cloud = node->create_subscription<sensor_msgs::msg::PointCloud2>(
+      "/cloud_registered", 1000, pointCloudCallBack);
+  auto sub_odom = node->create_subscription<nav_msgs::msg::Odometry>(
+      "/aft_mapped_to_init", 1000, odomCallBack);
 
-  pubCurrentBinary = nh.advertise<sensor_msgs::PointCloud2>("/cloud_key_points", 100);
-  pubMatchedCloud = nh.advertise<sensor_msgs::PointCloud2>("/cloud_matched", 100);
-  pubMatchedBinary = nh.advertise<sensor_msgs::PointCloud2>("/cloud_matched_key_points", 100);
-  pubSTD = nh.advertise<visualization_msgs::MarkerArray>("/descriptor_line", 10);
+  pubCurrentBinary = node->create_publisher<sensor_msgs::msg::PointCloud2>("/cloud_key_points", 100);
+  pubMatchedCloud = node->create_publisher<sensor_msgs::msg::PointCloud2>("/cloud_matched", 100);
+  pubMatchedBinary = node->create_publisher<sensor_msgs::msg::PointCloud2>("/cloud_matched_key_points", 100);
+  pubSTD = node->create_publisher<visualization_msgs::msg::MarkerArray>("/descriptor_line", 10);
 
-  ros::Rate loop(50000);
+  rclcpp::Rate loop(50000);
 
-  submap_pose_pub = nh.advertise<nav_msgs::Odometry>("/submap_pose", 100);
-  pubCurrentCloud = nh.advertise<sensor_msgs::PointCloud2>("/clouds_submap", 100);
-  submap_id_pub = nh.advertise<std_msgs::Int32>("/submap_ids", 100);
-  ros::Subscriber sub_notification = nh.subscribe<std_msgs::Float32MultiArray>("/odom_correction_info", 100, notificationCallback);
-  ros::Subscriber sub_timeCorrection = nh.subscribe<std_msgs::UInt64>("/time_correction", 100, jumptimeCallback);
-  lc_tranform_pub = nh.advertise<geometry_msgs::PoseWithCovariance>("/loop_closure_tranformation", 1);
-  des_pub1 = nh.advertise<visualization_msgs::Marker>("/des_prev_submaps", 1);
-  des_pub2 = nh.advertise<visualization_msgs::Marker>("/des_curr_submaps", 1);
-  inter_triangle_pub = nh.advertise<sensor_msgs::PointCloud2>("/inter_triangles", 10);
-  inter2_triangle_pub = nh.advertise<sensor_msgs::PointCloud2>("/inter2_triangles", 10);
-  lc_triangle_pub = nh.advertise<sensor_msgs::PointCloud2>("/lc_triangles", 10);
+  submap_pose_pub = node->create_publisher<nav_msgs::msg::Odometry>("/submap_pose", 100);
+  pubCurrentCloud = node->create_publisher<sensor_msgs::msg::PointCloud2>("/clouds_submap", 100);
+  submap_id_pub = node->create_publisher<std_msgs::msg::Int32>("/submap_ids", 100);
+  auto sub_notification = node->create_subscription<std_msgs::msg::Float32MultiArray>(
+      "/odom_correction_info", 100, notificationCallback);
+  auto sub_timeCorrection = node->create_subscription<std_msgs::msg::UInt64>(
+      "/time_correction", 100, jumptimeCallback);
+  lc_tranform_pub = node->create_publisher<geometry_msgs::msg::PoseWithCovariance>("/loop_closure_tranformation", 1);
+  des_pub1 = node->create_publisher<visualization_msgs::msg::Marker>("/des_prev_submaps", 1);
+  des_pub2 = node->create_publisher<visualization_msgs::msg::Marker>("/des_curr_submaps", 1);
+  inter_triangle_pub = node->create_publisher<sensor_msgs::msg::PointCloud2>("/inter_triangles", 10);
+  inter2_triangle_pub = node->create_publisher<sensor_msgs::msg::PointCloud2>("/inter2_triangles", 10);
+  lc_triangle_pub = node->create_publisher<sensor_msgs::msg::PointCloud2>("/lc_triangles", 10);
 
   time_lcd_file = std::fstream(save_directory +"times_loopdetection_LTAOM.txt", std::fstream::out);
   time_lcd_file.precision(std::numeric_limits<double>::max_digits10);
@@ -722,17 +753,17 @@ if (multisession_mode == 1){
   config_setting.skip_near_num_ = -100000;
   load_prior_descriptor(STD_map_prior, prior_history_plane_list);
 }
-  bool status = ros::ok();
+  bool status = rclcpp::ok();
   bool is_build_descriptor = false;
   int frame_number = 0;
   int key_frame_id = 0;
-  ros::Time time_submap_local;
+  builtin_interfaces::msg::Time time_submap_local;
   pcl::PointCloud<pcl::PointXYZI>::Ptr current_key_cloud(
       new pcl::PointCloud<pcl::PointXYZI>);
   bool just_jump = false;
   std::vector<double> time_stored_buf;
   while (status) {
-    ros::spinOnce();
+    rclcpp::spin_some(g_node);
     if (!lidar_buf.empty()) {
       if (frame_number == 0) {
         pcl::PointCloud<pcl::PointXYZI>::Ptr temp_cloud(
@@ -757,16 +788,16 @@ if (multisession_mode == 1){
       }
       time_submap_local = time_buf.front();
       if (just_jump){
-        if(time_submap_local.toNSec() <= jump_time)
+        if(toNSec(time_submap_local) <= jump_time)
         {
           lidar_buf.pop_front();
           time_buf.pop_front();
           continue;
         }
       }
-//      debug_file << "odom_buf.find(" << std::to_string(time_submap_local.toNSec()) << ")" << std::endl;
+//      debug_file << "odom_buf.find(" << std::to_string(toNSec(time_submap_local)) << ")" << std::endl;
       if (odom_buf.empty()) continue;
-      auto odom_buf_iter = odom_buf.find(time_submap_local.toNSec());
+      auto odom_buf_iter = odom_buf.find(toNSec(time_submap_local));
       if (odom_buf_iter == odom_buf.end())
       {
 //        debug_file << "find fail" << std::endl;
@@ -807,7 +838,7 @@ if (multisession_mode == 1){
         last_pose = odom_msg->pose.pose;
         continue;
       }
-      time_stored_buf.push_back(time_buf.front().toSec());
+      time_stored_buf.push_back(toSec(time_buf.front()));
 
       if(position_inc.norm() < position_threshold && rotation_inc < rotation_threshold){
         lidar_buf.pop_front();
@@ -839,9 +870,9 @@ if (multisession_mode == 1){
       //std::string pcd_name = save_directory + "lcd_rawcloud" + std::to_string(key_frame_id) + ".pcd";
       //pcl::io::savePCDFileBinary(pcd_name, *current_key_cloud);
 #ifdef for_pgo
-      std_msgs::Int32 id_msg;
+      std_msgs::msg::Int32 id_msg;
       id_msg.data = key_frame_id;
-      submap_id_pub.publish(id_msg);
+      submap_id_pub->publish(id_msg);
 #endif
 
       auto start1 = std::chrono::system_clock::now();
@@ -905,7 +936,7 @@ if (multisession_mode == 1){
       }
       *corners_last_ = *corners_curr_;
 
-      nav_msgs::OdometryPtr odom_pub (new nav_msgs::Odometry());
+      auto odom_pub = std::make_shared<nav_msgs::msg::Odometry>();
       odom_pub->header.frame_id = "camera_init";
       odom_pub->child_frame_id = "before_pgo";
       odom_pub->header.stamp = time_submap_local;
@@ -915,7 +946,7 @@ if (multisession_mode == 1){
       odom_pub->twist.covariance[1] = time_stored_buf.front();
       odom_pub->twist.covariance[2] = time_stored_buf.back();
       time_stored_buf.clear();
-      submap_pose_pub.publish(odom_pub);
+      submap_pose_pub->publish(*odom_pub);
 
       start1 = std::chrono::system_clock::now();
       history_binary_list.push_back(binary_list);
@@ -927,11 +958,11 @@ if (multisession_mode == 1){
 #endif
 
       //      history_binary_list.push_back(binary_list);
-      sensor_msgs::PointCloud2 pub_cloud;
+      sensor_msgs::msg::PointCloud2 pub_cloud;
       pcl::toROSMsg(*current_key_cloud, pub_cloud);
       pub_cloud.header.frame_id = "camera_init";
       pub_cloud.header.stamp = time_submap_local;
-      pubCurrentCloud.publish(pub_cloud);
+      pubCurrentCloud->publish(pub_cloud);
       loop.sleep();
 
       pcl::PointCloud<pcl::PointXYZ> key_points_cloud;
@@ -944,7 +975,7 @@ if (multisession_mode == 1){
       }
       pcl::toROSMsg(key_points_cloud, pub_cloud);
       pub_cloud.header.frame_id = "camera_init";
-      pubCurrentBinary.publish(pub_cloud);
+      pubCurrentBinary->publish(pub_cloud);
       loop.sleep();
       Eigen::Vector3d color1(1, 0, 0);
       publish_binary(binary_list, color1, "current", pubSTD);
@@ -988,27 +1019,31 @@ if (multisession_mode == 2)
 if (multisession_mode == 2)
 {
     bool save_one_time = false;
-    nh.getParam("/save_prior_info", save_one_time);
+    if (!g_node->has_parameter("save_prior_info")) {
+      g_node->declare_parameter<bool>("save_prior_info", false);
+    }
+    g_node->get_parameter("save_prior_info", save_one_time);
     if(save_one_time){
       std::string des_name = save_directory + "map_prior/descriptors.pcd";
       pcl::io::savePCDFileBinary(des_name, *des_to_store);
 
       if (!history_plane_list.empty()){
         pcl::PointCloud<pcl::PointXYZINormal>::Ptr plane_cloud_all (new pcl::PointCloud<pcl::PointXYZINormal>);
-        for (int i = 0; i < history_plane_list.size(); i++){
+        for (size_t i = 0; i < history_plane_list.size(); i++){
           std::cout << history_plane_list[i]->size() << std::endl;
           *plane_cloud_all += *(history_plane_list[i]);
           pcl::PointXYZINormal pt_tmp;
-          pt_tmp.x = -1010.1; pt_tmp.y = i; pt_tmp.z = 0;
+          pt_tmp.x = -1010.1; pt_tmp.y = static_cast<float>(i); pt_tmp.z = 0;
           plane_cloud_all->push_back(pt_tmp);
         }
         std::string pcd_name = save_directory + "map_prior/plane_all.pcd";
         pcl::io::savePCDFileBinary(pcd_name, *plane_cloud_all);
       }
-      nh.setParam("/save_prior_info", false);
+      g_node->set_parameter(rclcpp::Parameter("save_prior_info", false));
       save_one_time = false;
     }
 }
-    status = ros::ok();
+    status = rclcpp::ok();
   }
+  return 0;
 }

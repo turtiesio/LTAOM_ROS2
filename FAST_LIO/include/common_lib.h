@@ -5,12 +5,12 @@
 #include <Eigen/Eigen>
 #include <pcl/point_types.h>
 #include <pcl/point_cloud.h>
-#include <fast_lio/States.h>
-#include <fast_lio/Pose6D.h>
-#include <sensor_msgs/Imu.h>
-#include <nav_msgs/Odometry.h>
-#include <tf/transform_broadcaster.h>
-#include <eigen_conversions/eigen_msg.h>
+#include <fast_lio/msg/states.hpp>
+#include <fast_lio/msg/pose6_d.hpp>
+#include <sensor_msgs/msg/imu.hpp>
+#include <nav_msgs/msg/odometry.hpp>
+#include <tf2_ros/transform_broadcaster.h>
+#include <tf2_eigen/tf2_eigen.hpp>
 
 using namespace std;
 using namespace Eigen;
@@ -36,7 +36,7 @@ using namespace Eigen;
 #define STD_VEC_FROM_EIGEN(mat)  vector<decltype(mat)::Scalar> (mat.data(), mat.data() + mat.rows() * mat.cols())
 #define DEBUG_FILE_DIR(name)     (string(string(ROOT_DIR) + "Log/"+ name))
 
-typedef fast_lio::Pose6D Pose6D;
+typedef fast_lio::msg::Pose6D Pose6D;
 typedef pcl::PointXYZINormal PointType;
 typedef pcl::PointCloud<PointType> PointCloudXYZI;
 typedef vector<PointType, Eigen::aligned_allocator<PointType>>  PointVector;
@@ -50,12 +50,15 @@ typedef Matrix3f M3F;
 #define MF(a,b)  Matrix<float, (a), (b)>
 #define VF(a)    Matrix<float, (a), 1>
 
-M3D Eye3d(M3D::Identity());
-M3F Eye3f(M3F::Identity());
-V3D Zero3d(0, 0, 0);
-V3F Zero3f(0, 0, 0);
-// Vector3d Lidar_offset_to_IMU(0.05512, 0.02226, -0.0297); // Horizon
-// Vector3d Lidar_offset_to_IMU(0.04165, 0.02326, -0.0284); // Avia
+inline M3D Eye3d_init() { return M3D::Identity(); }
+inline M3F Eye3f_init() { return M3F::Identity(); }
+inline V3D Zero3d_init() { return V3D(0, 0, 0); }
+inline V3F Zero3f_init() { return V3F(0, 0, 0); }
+
+static M3D Eye3d = Eye3d_init();
+static M3F Eye3f = Eye3f_init();
+static V3D Zero3d = Zero3d_init();
+static V3F Zero3f = Zero3f_init();
 
 struct MeasureGroup     // Lidar data and imu dates for the curent process
 {
@@ -66,7 +69,7 @@ struct MeasureGroup     // Lidar data and imu dates for the curent process
     };
     double lidar_beg_time;
     PointCloudXYZI::Ptr lidar;
-    deque<sensor_msgs::Imu::ConstPtr> imu;
+    deque<sensor_msgs::msg::Imu::SharedPtr> imu;
 };
 
 struct StatesGroup
@@ -183,17 +186,9 @@ auto set_pose6d(const double t, const Matrix<T, 3, 1> &a, const Matrix<T, 3, 1> 
         rot_kp.pos[i] = p(i);
         for (int j = 0; j < 3; j++)  rot_kp.rot[i*3+j] = R(i,j);
     }
-    // Map<M3D>(rot_kp.rot, 3,3) = R;
     return move(rot_kp);
 }
 
-/* comment
-plane equation: Ax + By + Cz + D = 0
-convert to: A/D*x + B/D*y + C/D*z = -1
-solve: A0*x0 = b0
-where A0_i = [x_i, y_i, z_i], x0 = [A/D, B/D, C/D]^T, b0 = [-1, ..., -1]^T
-normvec:  normalized x0
-*/
 template<typename T>
 bool esti_normvector(Matrix<T, 3, 1> &normvec, const PointVector &point, const T &threshold, const int &point_num)
 {
@@ -209,7 +204,7 @@ bool esti_normvector(Matrix<T, 3, 1> &normvec, const PointVector &point, const T
         A(j,2) = point[j].z;
     }
     normvec = A.colPivHouseholderQr().solve(b);
-    
+
     for (int j = 0; j < point_num; j++)
     {
         if (fabs(normvec(0) * point[j].x + normvec(1) * point[j].y + normvec(2) * point[j].z + 1.0f) > threshold)
@@ -222,18 +217,15 @@ bool esti_normvector(Matrix<T, 3, 1> &normvec, const PointVector &point, const T
     return true;
 }
 
-float calc_dist(PointType p1, PointType p2){
+inline float calc_dist(PointType p1, PointType p2){
     float d = (p1.x - p2.x) * (p1.x - p2.x) + (p1.y - p2.y) * (p1.y - p2.y) + (p1.z - p2.z) * (p1.z - p2.z);
     return d;
 }
 
-double calc_dist_ondouble(PointType p1, double p2x, double p2y, double p2z){
+inline double calc_dist_ondouble(PointType p1, double p2x, double p2y, double p2z){
     double p1x = double(p1.x);
     double p1y = double(p1.y);
     double p1z = double(p1.z);
-//    double p2x = double(p2.x);
-//    double p2y = double(p2.y);
-//    double p2z = double(p2.z);
     double d = (p1x - p2x) * (p1x - p2x) + (p1y - p2y) * (p1y - p2y) + (p1z - p2z) * (p1z - p2z);
     return d;
 }
@@ -270,19 +262,6 @@ bool esti_plane(Matrix<T, 4, 1> &pca_result, const PointVector &point, const T &
         }
     }
 
-    // for (int j = 0; j < NUM_MATCH_POINTS; j++)
-    // {
-    //     if (fabs(normvec(0) * point[j].x + normvec(1) * point[j].y + normvec(2) * point[j].z + 1.0f) > threshold)
-    //     {
-    //         return false;
-    //     }
-    // }
-
-    // T n = normvec.norm();
-    // pca_result(0) = normvec(0) / n;
-    // pca_result(1) = normvec(1) / n;
-    // pca_result(2) = normvec(2) / n;
-    // pca_result(3) = 1.0 / n; 
     return true;
 }
 

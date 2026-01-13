@@ -2734,13 +2734,12 @@ double geometric_icp(const ConfigSetting &config_setting,
   }
   kd_tree->setInputCloud(input_cloud);
   Eigen::Quaterniond q(rot.cast<double>());
-  ceres::LocalParameterization *q_parameterization =
-      new ceres::EigenQuaternionParameterization();
+  ceres::Manifold *q_manifold = new ceres::EigenQuaternionManifold();
   ceres::Problem problem;
   ceres::LossFunction *loss_function = new ceres::HuberLoss(0.1);
   double para_q[4] = {q.x(), q.y(), q.z(), q.w()};
   double para_t[3] = {t(0), t(1), t(2)};
-  problem.AddParameterBlock(para_q, 4, q_parameterization);
+  problem.AddParameterBlock(para_q, 4, q_manifold);
   problem.AddParameterBlock(para_t, 3);
   Eigen::Map<Eigen::Quaterniond> q_last_curr(para_q);
   Eigen::Map<Eigen::Vector3d> t_last_curr(para_t);
@@ -2828,11 +2827,11 @@ void add_STD(std::unordered_map<STD_LOC, std::vector<STD>> &descriptor_map,
 void publish_binary(const std::vector<BinaryDescriptor> &binary_list,
                     const Eigen::Vector3d &text_color,
                     const std::string &text_ns,
-                    const ros::Publisher &text_publisher) {
-  visualization_msgs::MarkerArray text_array;
-  visualization_msgs::Marker text;
-  text.type = visualization_msgs::Marker::TEXT_VIEW_FACING;
-  text.action = visualization_msgs::Marker::ADD;
+                    const rclcpp::Publisher<visualization_msgs::msg::MarkerArray>::SharedPtr &text_publisher) {
+  visualization_msgs::msg::MarkerArray text_array;
+  visualization_msgs::msg::Marker text;
+  text.type = visualization_msgs::msg::Marker::TEXT_VIEW_FACING;
+  text.action = visualization_msgs::msg::Marker::ADD;
   text.ns = text_ns;
   text.color.a = 0.8; // Don't forget to set the alpha!
   text.scale.z = 0.08;
@@ -2860,17 +2859,17 @@ void publish_binary(const std::vector<BinaryDescriptor> &binary_list,
     text.id++;
     text_array.markers.push_back(text);
   }
-  text_publisher.publish(text_array);
+  text_publisher->publish(text_array);
   return;
 }
 
 void publish_std_list(const std::vector<STD> &std_list,
-                      const ros::Publisher &std_publisher) {
+                      const rclcpp::Publisher<visualization_msgs::msg::MarkerArray>::SharedPtr &std_publisher) {
   // publish descriptor
-  visualization_msgs::MarkerArray ma_line;
-  visualization_msgs::Marker m_line;
-  m_line.type = visualization_msgs::Marker::LINE_LIST;
-  m_line.action = visualization_msgs::Marker::ADD;
+  visualization_msgs::msg::MarkerArray ma_line;
+  visualization_msgs::msg::Marker m_line;
+  m_line.type = visualization_msgs::msg::Marker::LINE_LIST;
+  m_line.action = visualization_msgs::msg::Marker::ADD;
   m_line.ns = "std";
   // Don't forget to set the alpha!
   m_line.scale.x = 0.25;
@@ -2883,7 +2882,7 @@ void publish_std_list(const std::vector<STD> &std_list,
   m_line.color.b = 0;
   m_line.color.a = 0.8;
   for (auto var : std_list) {
-    geometry_msgs::Point p;
+    geometry_msgs::msg::Point p;
     p.x = var.binary_A_.location_[0];
     p.y = var.binary_A_.location_[1];
     p.z = var.binary_A_.location_[2];
@@ -2923,19 +2922,19 @@ void publish_std_list(const std::vector<STD> &std_list,
     ma_line.markers.push_back(m_line);
     m_line.id++;
   }
-  std_publisher.publish(ma_line);
+  std_publisher->publish(ma_line);
   m_line.id = 0;
   ma_line.markers.clear();
 }
 
 void publish_std(const std::vector<std::pair<STD, STD>> &match_std_list,
-                 const ros::Publisher &std_publisher) {
+                 const rclcpp::Publisher<visualization_msgs::msg::MarkerArray>::SharedPtr &std_publisher) {
   // publish descriptor
   // bool transform_enable = true;
-  visualization_msgs::MarkerArray ma_line;
-  visualization_msgs::Marker m_line;
-  m_line.type = visualization_msgs::Marker::LINE_LIST;
-  m_line.action = visualization_msgs::Marker::ADD;
+  visualization_msgs::msg::MarkerArray ma_line;
+  visualization_msgs::msg::Marker m_line;
+  m_line.type = visualization_msgs::msg::Marker::LINE_LIST;
+  m_line.action = visualization_msgs::msg::Marker::ADD;
   m_line.ns = "lines";
   // Don't forget to set the alpha!
   m_line.scale.x = 0.25;
@@ -2953,7 +2952,7 @@ void publish_std(const std::vector<std::pair<STD, STD>> &match_std_list,
     m_line.color.r = 0;
     m_line.color.g = 1;
     m_line.color.b = 0;
-    geometry_msgs::Point p;
+    geometry_msgs::msg::Point p;
     p.x = var.second.binary_A_.location_[0];
     p.y = var.second.binary_A_.location_[1];
     p.z = var.second.binary_A_.location_[2];
@@ -3069,7 +3068,7 @@ void publish_std(const std::vector<std::pair<STD, STD>> &match_std_list,
     ma_line.markers.push_back(m_line);
     m_line.id++;
   }
-  std_publisher.publish(ma_line);
+  std_publisher->publish(ma_line);
   m_line.id = 0;
   ma_line.markers.clear();
 }
@@ -3163,7 +3162,7 @@ double calc_overlap(const pcl::PointCloud<pcl::PointXYZI>::Ptr &cloud1,
 }
 
 void CalcQuation(const Eigen::Vector3d &vec, const int axis,
-                 geometry_msgs::Quaternion &q) {
+                 geometry_msgs::msg::Quaternion &q) {
   Eigen::Vector3d x_body = vec;
   Eigen::Vector3d y_body(1, 1, 0);
   if (x_body(2) != 0) {
@@ -3194,20 +3193,20 @@ void CalcQuation(const Eigen::Vector3d &vec, const int axis,
   q.z = eq.z();
 }
 
-void pubPlane(const ros::Publisher &plane_pub, const std::string plane_ns,
+void pubPlane(const rclcpp::Publisher<visualization_msgs::msg::Marker>::SharedPtr &plane_pub, const std::string plane_ns,
               const int plane_id, const pcl::PointXYZINormal normal_p,
               const float radius, const Eigen::Vector3d rgb) {
-  visualization_msgs::Marker plane;
+  visualization_msgs::msg::Marker plane;
   plane.header.frame_id = "camera_init";
-  plane.header.stamp = ros::Time();
+  plane.header.stamp = rclcpp::Time();
   plane.ns = plane_ns;
   plane.id = plane_id;
-  plane.type = visualization_msgs::Marker::CUBE;
-  plane.action = visualization_msgs::Marker::ADD;
+  plane.type = visualization_msgs::msg::Marker::CUBE;
+  plane.action = visualization_msgs::msg::Marker::ADD;
   plane.pose.position.x = normal_p.x;
   plane.pose.position.y = normal_p.y;
   plane.pose.position.z = normal_p.z;
-  geometry_msgs::Quaternion q;
+  geometry_msgs::msg::Quaternion q;
   Eigen::Vector3d normal_vec(normal_p.normal_x, normal_p.normal_y,
                              normal_p.normal_z);
   CalcQuation(normal_vec, 2, q);
@@ -3219,8 +3218,8 @@ void pubPlane(const ros::Publisher &plane_pub, const std::string plane_ns,
   plane.color.r = fabs(rgb(0));
   plane.color.g = fabs(rgb(1));
   plane.color.b = fabs(rgb(2));
-  plane.lifetime = ros::Duration();
-  plane_pub.publish(plane);
+  plane.lifetime = rclcpp::Duration(0, 0);
+  plane_pub->publish(plane);
 }
 
 pcl::PointXYZI vec2point(const Eigen::Vector3d &vec) {

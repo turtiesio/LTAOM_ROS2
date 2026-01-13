@@ -1,86 +1,111 @@
-cmake_minimum_required(VERSION 3.0.2)
+cmake_minimum_required(VERSION 3.8)
 project(std_loop)
 
-## Compile as C++11, supported in ROS Kinetic and newer
+if(CMAKE_COMPILER_IS_GNUCXX OR CMAKE_CXX_COMPILER_ID MATCHES "Clang")
+  add_compile_options(-Wall -Wextra -Wpedantic)
+endif()
+
+set(CMAKE_BUILD_TYPE "Release")
+set(CMAKE_CXX_STANDARD 17)
 set(CMAKE_CXX_STANDARD_REQUIRED ON)
 set(CMAKE_CXX_EXTENSIONS OFF)
-set(CMAKE_CXX_STANDARD 17)
-SET(CMAKE_BUILD_TYPE "Release")
-#SET(CMAKE_CXX_FLAGS_DEBUG "$ENV{CXXFLAGS} -O0 -Wall -g -ggdb")
-#SET(CMAKE_CXX_FLAGS_RELEASE "$ENV{CXXFLAGS} -O3 -Wall")
-## Find catkin macros and libraries
-## if COMPONENTS list like find_package(catkin REQUIRED COMPONENTS xyz)
-## is used, also find other catkin packages
-find_package(catkin REQUIRED COMPONENTS
-  cv_bridge
-  pcl_conversions
-  pcl_ros
-  roscpp
-  rospy
-  sensor_msgs
-  std_msgs
-  tf_conversions
-  nodelet
-)
 
-## System dependencies are found with CMake's conventions
-# find_package(Boost REQUIRED COMPONENTS system)
-find_package(PCL REQUIRED)
+find_package(ament_cmake REQUIRED)
+find_package(rclcpp REQUIRED)
+find_package(rclcpp_components REQUIRED)
+find_package(std_msgs REQUIRED)
+find_package(sensor_msgs REQUIRED)
+find_package(nav_msgs REQUIRED)
+find_package(geometry_msgs REQUIRED)
+find_package(visualization_msgs REQUIRED)
+find_package(builtin_interfaces REQUIRED)
+find_package(cv_bridge REQUIRED)
+find_package(pcl_conversions REQUIRED)
+find_package(tf2 REQUIRED)
+find_package(tf2_ros REQUIRED)
+find_package(tf2_eigen REQUIRED)
+
+find_package(PCL REQUIRED COMPONENTS common io filters)
 find_package(OpenCV REQUIRED)
-find_package(Threads)
+find_package(Threads REQUIRED)
 find_package(Ceres REQUIRED)
-
-set(CMAKE_AUTOMOC ON)
-set(CMAKE_AUTOUIC ON)
-set(CMAKE_AUTORCC ON)
-set(CMAKE_INCLUDE_CURRENT_DIR ON)
-
-catkin_package(
- CATKIN_DEPENDS roscpp rospy std_msgs
-)
-
-set(LIB_OPENCV_IMGPROC_DIR /home/zuhaozou/tbb)
-add_library(libtbb SHARED IMPORTED)
-set_target_properties(libtbb PROPERTIES IMPORTED_LOCATION ${LIB_OPENCV_IMGPROC_DIR}/build/my_tbb_build_release/libtbb.so.2)
+find_package(TBB QUIET)
 
 include_directories(
-  include
-  ${catkin_INCLUDE_DIRS}
+  ${CMAKE_CURRENT_SOURCE_DIR}
+  ${CMAKE_CURRENT_SOURCE_DIR}/include
+  ${CMAKE_CURRENT_SOURCE_DIR}/src
   ${PCL_INCLUDE_DIRS}
   ${OpenCV_INCLUDE_DIRS}
-  ${LIB_OPENCV_IMGPROC_DIR}/include
+  ${CERES_INCLUDE_DIRS}
 )
 
-#add_executable(std_loop_test src/main.cpp src/std.cpp )
-#target_link_libraries(std_loop_test
-#        ${catkin_LIBRARIES}
-#        ${PCL_LIBRARIES}
-#        ${OpenCV_LIBS}
-#        ${CERES_LIBRARIES}
-#        libtbb)
-
-#add_executable(std_loop_detection src/bag_loop.cpp src/std.cpp )
-#target_link_libraries(std_loop_detection
-#        ${catkin_LIBRARIES}
-#        ${PCL_LIBRARIES}
-#        ${OpenCV_LIBS}
-#        ${CERES_LIBRARIES}
-#      libtbb)
-
-#add_executable(loop_detection src/loop_detection.cpp src/std.cpp src/std_ba.cpp)
-add_library(loop_detection src/loop_detection.cpp src/std.cpp src/std_ba.cpp)
-target_link_libraries(loop_detection
-        ${catkin_LIBRARIES}
-        ${PCL_LIBRARIES}
-        ${OpenCV_LIBS}
-        ${CERES_LIBRARIES}
-        libtbb
-)
-
-add_library(loop_detection_plugin
-  src/loop_detection_plugin.cpp
-)
-target_link_libraries(loop_detection_plugin loop_detection ${catkin_LIBRARIES})
-if(catkin_EXPORTED_LIBRARIES)
-  add_dependencies(loop_detection_plugin ${catkin_EXPORTED_LIBRARIES})
+if(TBB_FOUND)
+  include_directories(${TBB_INCLUDE_DIRS})
 endif()
+
+set(dependencies
+  rclcpp
+  rclcpp_components
+  std_msgs
+  sensor_msgs
+  nav_msgs
+  geometry_msgs
+  visualization_msgs
+  builtin_interfaces
+  cv_bridge
+  pcl_conversions
+  tf2
+  tf2_ros
+  tf2_eigen
+)
+
+add_library(loop_detection SHARED
+  src/loop_detection.cpp
+  src/std.cpp
+  src/std_ba.cpp
+)
+target_link_libraries(loop_detection
+  ${PCL_LIBRARIES}
+  ${OpenCV_LIBS}
+  ${CERES_LIBRARIES}
+)
+if(TBB_FOUND)
+  target_link_libraries(loop_detection TBB::tbb)
+endif()
+ament_target_dependencies(loop_detection ${dependencies})
+
+# Create executable
+add_executable(loop_detection_node
+  src/loop_detection.cpp
+  src/std.cpp
+  src/std_ba.cpp
+)
+target_link_libraries(loop_detection_node
+  ${PCL_LIBRARIES}
+  ${OpenCV_LIBS}
+  ${CERES_LIBRARIES}
+)
+if(TBB_FOUND)
+  target_link_libraries(loop_detection_node TBB::tbb)
+endif()
+ament_target_dependencies(loop_detection_node ${dependencies})
+
+install(TARGETS
+  loop_detection
+  loop_detection_node
+  ARCHIVE DESTINATION lib
+  LIBRARY DESTINATION lib
+  RUNTIME DESTINATION lib/${PROJECT_NAME}
+)
+
+install(DIRECTORY
+  launch
+  config
+  DESTINATION share/${PROJECT_NAME}
+)
+
+ament_export_libraries(loop_detection)
+ament_export_dependencies(${dependencies})
+
+ament_package()

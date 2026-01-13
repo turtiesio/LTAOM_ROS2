@@ -47,20 +47,23 @@ Dr. Fu Zhang < fuzhang@hku.hk >.
 #include "TunningPointPairsFactor.h"
 #include "common_lib.hpp"
 
-#include <ros/ros.h>
-#include <sensor_msgs/PointCloud2.h>
-#include <std_msgs/Float32MultiArray.h>
-#include <std_msgs/Float64MultiArray.h>
-#include <std_msgs/UInt64.h>
-#include <nav_msgs/Odometry.h>
-#include <nav_msgs/Path.h>
-#include <geometry_msgs/PoseWithCovariance.h>
+#include <rclcpp/rclcpp.hpp>
+#include <sensor_msgs/msg/point_cloud2.hpp>
+#include <std_msgs/msg/float32_multi_array.hpp>
+#include <std_msgs/msg/float64_multi_array.hpp>
+#include <std_msgs/msg/u_int64.hpp>
+#include <nav_msgs/msg/odometry.hpp>
+#include <nav_msgs/msg/path.hpp>
+#include <geometry_msgs/msg/pose_with_covariance.hpp>
 #include <pcl/common/time.h>
 #include <pcl/common/transforms.h>
 #include <pcl_conversions/pcl_conversions.h>
 #include <pcl/exceptions.h>
-#include <visualization_msgs/Marker.h>
-#include <visualization_msgs/MarkerArray.h>
+#include <visualization_msgs/msg/marker.hpp>
+#include <visualization_msgs/msg/marker_array.hpp>
+#include <tf2/LinearMath/Quaternion.h>
+#include <tf2/LinearMath/Matrix3x3.h>
+#include <tf2_geometry_msgs/tf2_geometry_msgs.hpp>
 
 #include <gtsam/inference/Symbol.h>
 #include <gtsam/nonlinear/Values.h>
@@ -70,6 +73,7 @@ Dr. Fu Zhang < fuzhang@hku.hk >.
 #include <gtsam/slam/BetweenFactor.h>
 #include <gtsam/navigation/GPSFactor.h>
 #include <gtsam/nonlinear/ISAM2.h>
+#include "ISAM2Extended.h"
 #include <gtsam/slam/dataset.h>
 #include <gtsam/nonlinear/Marginals.h>
 
@@ -85,6 +89,11 @@ Dr. Fu Zhang < fuzhang@hku.hk >.
 #include <unistd.h>
 
 #define PI 3.14159265
+
+// Helper function to convert ROS2 Time to seconds
+inline double toSec(const builtin_interfaces::msg::Time& t) {
+    return static_cast<double>(t.sec) + static_cast<double>(t.nanosec) * 1e-9;
+}
 
 //#define as_node
 #ifdef as_node
@@ -114,12 +123,20 @@ std::fstream times_opt_file;
 std::fstream lc_file;
 std::fstream opt_debug_file;
 std::fstream time_full_pgo_thread;
-ros::Publisher pubAndSaveGloablMapAftPGO, pubOdomAftPGO, pubPathAftPGO, \
-               pubPathAftPGOPrior, pubLoopClosure;
 
-std::deque<nav_msgs::Odometry::ConstPtr> odom_buf_;
-std::deque<sensor_msgs::PointCloud2ConstPtr> cloud_buf_, interT_buf_, inter2T_buf_, LCT_buf_;
-std::deque<geometry_msgs::PoseWithCovarianceConstPtr> loopclosure_buf_;
+// Global node pointer
+rclcpp::Node::SharedPtr g_node = nullptr;
+
+// ROS2 Publishers
+rclcpp::Publisher<sensor_msgs::msg::PointCloud2>::SharedPtr pubAndSaveGloablMapAftPGO;
+rclcpp::Publisher<nav_msgs::msg::Odometry>::SharedPtr pubOdomAftPGO;
+rclcpp::Publisher<nav_msgs::msg::Path>::SharedPtr pubPathAftPGO;
+rclcpp::Publisher<nav_msgs::msg::Path>::SharedPtr pubPathAftPGOPrior;
+rclcpp::Publisher<visualization_msgs::msg::Marker>::SharedPtr pubLoopClosure;
+
+std::deque<nav_msgs::msg::Odometry::SharedPtr> odom_buf_;
+std::deque<sensor_msgs::msg::PointCloud2::SharedPtr> cloud_buf_, interT_buf_, inter2T_buf_, LCT_buf_;
+std::deque<geometry_msgs::msg::PoseWithCovariance::SharedPtr> loopclosure_buf_;
 
 std::unordered_map<VOXEL_LOC, gtsam::Pose3> lc_pose_uomap;
 //std::unordered_map<int, std::pair<gtsam::Pose3,gtsam::Pose3>> largejump_uomap;
@@ -136,7 +153,7 @@ gtsam::FastVector<size_t> factors_toremove;
 std::mutex mtx_sub_, mtx_pgo_, mtx_keyf_read_;
 
 gtsam::NonlinearFactorGraph gts_graph_, gts_graph_recover_;
-gtsam::ISAM2 *isam_;
+gtsam::ISAM2Extended *isam_;
 gtsam::Values gts_init_vals_;
 gtsam::Values gts_init_vals_recover_;
 gtsam::Values gts_cur_vals_;
@@ -173,30 +190,38 @@ bool has_add_prior_node = false;
 float x_range_max, y_range_max, z_range_max;
 float x_range_min, y_range_min, z_range_min;
 
-bool loadConfig(ros::NodeHandle &nh)
+bool loadConfig(rclcpp::Node::SharedPtr node)
 {
-    if(nh.hasParam("OverlapScoreThr"))
-        ROS_INFO("Loop Correction Node Successfully Loaded Config Parameters.");
-    else
-    {
-        ROS_ERROR("Loop Correction Node Cannot Find Config Parameters File!");
-        return false;
-    }
-    nh.param<float>("OverlapScoreThr",overlap_score_thr,0.5);
-    //nh.param<float>("FirstOverlapScoreThr",first_overlap_score_thr,0.8);
-    nh.param<int>("NumPrKeyPtFactor",pairfactor_num,6);
-    nh.param<float>("PlaneInlinerRatioThr",plane_inliner_ratio_thr,0.5);
-    nh.param<float>("VoxelSizeForOverlapCalc",vs_for_ovlap,2);
-    nh.param<bool>("SavePCD",dosave_pcd,false);
-    nh.param<int>("PCDSaveStep",pcdsave_step,10);
-    nh.param<bool>("PubCorrectedMap",dopub_corrmap,false);
-    nh.param<string>("SaveDir",save_directory,"");
-    nh.param<int>("multisession_mode",multisession_mode, 0);
+    // Declare parameters with defaults
+    node->declare_parameter<double>("OverlapScoreThr", 0.5);
+    node->declare_parameter<int>("NumPrKeyPtFactor", 6);
+    node->declare_parameter<double>("PlaneInlinerRatioThr", 0.5);
+    node->declare_parameter<double>("VoxelSizeForOverlapCalc", 2.0);
+    node->declare_parameter<bool>("SavePCD", false);
+    node->declare_parameter<int>("PCDSaveStep", 10);
+    node->declare_parameter<bool>("PubCorrectedMap", false);
+    node->declare_parameter<std::string>("SaveDir", "");
+    node->declare_parameter<int>("multisession_mode", 0);
+    node->declare_parameter<std::vector<double>>("AdjKPFCov", std::vector<double>{0.1, 0.1, 0.1});
+    node->declare_parameter<std::vector<double>>("LCKPFCov", std::vector<double>{0.1, 0.1, 0.1});
+    node->declare_parameter<std::vector<double>>("MargFCov", std::vector<double>{0.01, 0.01, 0.01, 0.01, 0.01, 0.01});
+
+    RCLCPP_INFO(node->get_logger(), "Loop Correction Node Loading Config Parameters.");
+
+    overlap_score_thr = static_cast<float>(node->get_parameter("OverlapScoreThr").as_double());
+    pairfactor_num = node->get_parameter("NumPrKeyPtFactor").as_int();
+    plane_inliner_ratio_thr = static_cast<float>(node->get_parameter("PlaneInlinerRatioThr").as_double());
+    vs_for_ovlap = static_cast<float>(node->get_parameter("VoxelSizeForOverlapCalc").as_double());
+    dosave_pcd = node->get_parameter("SavePCD").as_bool();
+    pcdsave_step = node->get_parameter("PCDSaveStep").as_int();
+    dopub_corrmap = node->get_parameter("PubCorrectedMap").as_bool();
+    save_directory = node->get_parameter("SaveDir").as_string();
+    multisession_mode = node->get_parameter("multisession_mode").as_int();
 
     std::vector<double> cov1, cov2, cov3;
-    nh.param<vector<double>>("AdjKPFCov", cov1, vector<double>());
-    nh.param<vector<double>>("LCKPFCov", cov2, vector<double>());
-    nh.param<vector<double>>("MargFCov", cov3, vector<double>());
+    cov1 = node->get_parameter("AdjKPFCov").as_double_array();
+    cov2 = node->get_parameter("LCKPFCov").as_double_array();
+    cov3 = node->get_parameter("MargFCov").as_double_array();
 
     gtsam::Vector noise_vec3(3);
     noise_vec3 << cov1[0], cov1[1], cov1[2];
@@ -223,14 +248,14 @@ int wrap4Gtsam(int val)
     int out = val<0?-val+50000:val;
     return out;
 }
-void odometryCallback(const nav_msgs::Odometry::ConstPtr &odom_msg)
+void odometryCallback(const nav_msgs::msg::Odometry::SharedPtr odom_msg)
 {
     mtx_sub_.lock();
     odom_buf_.push_back(odom_msg);
     mtx_sub_.unlock();
 }
 
-void notificationCallback(const std_msgs::Float64MultiArray::ConstPtr &msg)
+void notificationCallback(const std_msgs::msg::Float64MultiArray::SharedPtr msg)
 {
     if (msg->data[0] == 2 && fastlio_notify_type == 1)
     {
@@ -238,33 +263,33 @@ void notificationCallback(const std_msgs::Float64MultiArray::ConstPtr &msg)
             gtsam::Point3(msg->data[4], msg->data[5], msg->data[6]));
         subpose_afterjump = gtsam::Pose3(gtsam::Rot3::RzRyRx(msg->data[7], msg->data[8], msg->data[9]), \
             gtsam::Point3(msg->data[10], msg->data[11], msg->data[12]));
-        opt_debug_file << "*subpose_afterjump: " << subpose_afterjump.translation()  <<endl;
+        opt_debug_file << "*subpose_afterjump: " << subpose_afterjump.translation()  << std::endl;
     }
     fastlio_notify_type = int(msg->data[0]);
 }
-void jumptimeCallback(const std_msgs::UInt64::ConstPtr &msg)
+void jumptimeCallback(const std_msgs::msg::UInt64::SharedPtr msg)
 {
     jump_time = msg->data;
 }
-void cloudCallback(const sensor_msgs::PointCloud2ConstPtr &cloud_msg)
+void cloudCallback(const sensor_msgs::msg::PointCloud2::SharedPtr cloud_msg)
 {
     mtx_sub_.lock();
     cloud_buf_.push_back(cloud_msg);
     mtx_sub_.unlock();
 }
-void interKPPairCallback(const sensor_msgs::PointCloud2ConstPtr &cloud_msg)
+void interKPPairCallback(const sensor_msgs::msg::PointCloud2::SharedPtr cloud_msg)
 {
     mtx_sub_.lock();
     interT_buf_.push_back(cloud_msg);
     mtx_sub_.unlock();
 }
-void inter2KPPairCallback(const sensor_msgs::PointCloud2ConstPtr &cloud_msg)
+void inter2KPPairCallback(const sensor_msgs::msg::PointCloud2::SharedPtr cloud_msg)
 {
     mtx_sub_.lock();
     inter2T_buf_.push_back(cloud_msg);
     mtx_sub_.unlock();
 }
-void loopClosureKPPairCallback(const sensor_msgs::PointCloud2ConstPtr &cloud_msg)
+void loopClosureKPPairCallback(const sensor_msgs::msg::PointCloud2::SharedPtr cloud_msg)
 {
     mtx_sub_.lock();
     LCT_buf_.push_back(cloud_msg);
@@ -286,7 +311,7 @@ void removeLC(const int curr_node_idx, const int prev_node_idx)
     }
     if (l < LCT_buf_.size()) LCT_buf_.erase(LCT_buf_.begin()+l);
 }
-void loopClosureCallback(const geometry_msgs::PoseWithCovarianceConstPtr& lc_msg)
+void loopClosureCallback(const geometry_msgs::msg::PoseWithCovariance::SharedPtr lc_msg)
 {
     mtx_sub_.lock();
     loopclosure_buf_.push_back(lc_msg);
@@ -385,7 +410,7 @@ float calculateOverlapScore(const pcl::PointCloud<PointType>::Ptr& currKeyframeC
                 pcl::io::savePCDFileBinary(pgo_scan_directory + "/LargeOverlap/" + std::to_string(pre_idx) + "_" + std::to_string(cur_idx) + "cloud_target.pcd", *targetKeyframeCloud_ds); // scan
             } catch (pcl::PCLException e)
             {
-                ROS_ERROR("%s", e.what());
+                RCLCPP_ERROR(g_node->get_logger(), "%s", e.what());
             }
 
         }
@@ -397,7 +422,7 @@ float calculateOverlapScore(const pcl::PointCloud<PointType>::Ptr& currKeyframeC
                 pcl::io::savePCDFileBinary(pgo_scan_directory + "/LowOverlap/" + std::to_string(pre_idx) + "_" + std::to_string(cur_idx) + "cloud_target.pcd", *targetKeyframeCloud_ds); // scan
             } catch (pcl::PCLException e)
             {
-                ROS_ERROR("%s", e.what());
+                RCLCPP_ERROR(g_node->get_logger(), "%s", e.what());
             }
         }
     }
@@ -410,50 +435,54 @@ void pubPath()
 {
     if (keyframes_.empty())  return;
 //  if (loop_corr_counter!=2) return;
-    nav_msgs::Odometry odomAftPGO;
-    nav_msgs::PathPtr pathAftPGO (new nav_msgs::Path());
-    pathAftPGO->header.frame_id = "/camera_init"; //"/world";
-    for (int i=0; i < keyframes_.size(); i++)
+    nav_msgs::msg::Odometry odomAftPGO;
+    auto pathAftPGO = std::make_shared<nav_msgs::msg::Path>();
+    pathAftPGO->header.frame_id = "camera_init"; //"/world";
+    for (size_t i=0; i < keyframes_.size(); i++)
     {
-        nav_msgs::Odometry odomAftPGOthis;
-        odomAftPGOthis.header.frame_id = "/camera_init"; //"/world";
-        odomAftPGOthis.child_frame_id = "/aft_pgo";
+        nav_msgs::msg::Odometry odomAftPGOthis;
+        odomAftPGOthis.header.frame_id = "camera_init"; //"/world";
+        odomAftPGOthis.child_frame_id = "aft_pgo";
         odomAftPGOthis.header.stamp = keyframes_[i].KeyTime;
-        odomAftPGOthis.header.seq = i;
         odomAftPGOthis.pose.pose.position.x = keyframes_[i].KeyPoseOpt.x;
         odomAftPGOthis.pose.pose.position.y = keyframes_[i].KeyPoseOpt.y;
         odomAftPGOthis.pose.pose.position.z = keyframes_[i].KeyPoseOpt.z;
 
-        odomAftPGOthis.pose.pose.orientation = tf::createQuaternionMsgFromRollPitchYaw(keyframes_[i].KeyPoseOpt.roll, keyframes_[i].KeyPoseOpt.pitch, keyframes_[i].KeyPoseOpt.yaw);
+        tf2::Quaternion q;
+        q.setRPY(keyframes_[i].KeyPoseOpt.roll, keyframes_[i].KeyPoseOpt.pitch, keyframes_[i].KeyPoseOpt.yaw);
+        odomAftPGOthis.pose.pose.orientation.x = q.x();
+        odomAftPGOthis.pose.pose.orientation.y = q.y();
+        odomAftPGOthis.pose.pose.orientation.z = q.z();
+        odomAftPGOthis.pose.pose.orientation.w = q.w();
 
-        geometry_msgs::PoseStamped poseStampAftPGO;
+        geometry_msgs::msg::PoseStamped poseStampAftPGO;
         poseStampAftPGO.header = odomAftPGOthis.header;
         poseStampAftPGO.pose = odomAftPGOthis.pose.pose;
 
         pathAftPGO->header.stamp = odomAftPGOthis.header.stamp;
-        pathAftPGO->header.frame_id = "/camera_init"; //"/world";
+        pathAftPGO->header.frame_id = "camera_init"; //"/world";
         pathAftPGO->poses.push_back(poseStampAftPGO);
     }
-    pubPathAftPGO.publish(pathAftPGO);
-    ros::spinOnce();
+    pubPathAftPGO->publish(*pathAftPGO);
+    rclcpp::spin_some(g_node);
     opt_debug_file << "[PubPath]: path size " << pathAftPGO->poses.size() << std::endl;
 }
 
-visualization_msgs::Marker lines_;
+visualization_msgs::msg::Marker lines_;
 void pubLoopClosureVisualization(const int prev_idx, const int curr_idx){
-    lines_.header.stamp = ros::Time::now();
-    lines_.header.frame_id = "/camera_init"; //"/world";
+    lines_.header.stamp = g_node->now();
+    lines_.header.frame_id = "camera_init"; //"/world";
     lines_.ns = "loopclosure_lines";
-    lines_.action = visualization_msgs::Marker::ADD;
+    lines_.action = visualization_msgs::msg::Marker::ADD;
     lines_.pose.orientation.w = 1.0f;
     lines_.id = loop_corr_counter;
-    lines_.type = visualization_msgs::Marker::LINE_LIST;
+    lines_.type = visualization_msgs::msg::Marker::LINE_LIST;
     lines_.scale.x = 0.5;
     lines_.color.r = 1.0f;
     lines_.color.g = 0.0f;
     lines_.color.b = 0.0f;
     lines_.color.a = 1.0f;
-    geometry_msgs::Point point_a, point_b;
+    geometry_msgs::msg::Point point_a, point_b;
 
 if (multisession_mode == 1)
 {
@@ -480,9 +509,9 @@ else
     lines_.points.push_back(point_a);
     lines_.points.push_back(point_b);
 
-    if (pubLoopClosure.getNumSubscribers() != 0)
+    if (pubLoopClosure->get_subscription_count() != 0)
     {
-        pubLoopClosure.publish(lines_);
+        pubLoopClosure->publish(lines_);
     }
 }
 
@@ -606,7 +635,7 @@ void correctPosesAndSaveTxt()
     if (last_kfsize==keyframes_.size()) return;
     last_kfsize = keyframes_.size();
     auto start1 = std::chrono::system_clock::now();
-    poses_opt_file.open(poses_opt_fname, ios::out | ios::trunc);
+    poses_opt_file.open(poses_opt_fname, std::ios::out | std::ios::trunc);
     auto end1 = std::chrono::system_clock::now();
     auto elapsed_ms = (std::chrono::duration<double,std::milli>(end1 - start1)).count();
     for (int i = 0; i < keyframes_.size(); i++)
@@ -615,7 +644,7 @@ void correctPosesAndSaveTxt()
         tf2::Quaternion q;
         q.setRPY(pose_optimized.rotation().roll(), pose_optimized.rotation().pitch(), pose_optimized.rotation().yaw());
         auto start2 = std::chrono::system_clock::now();
-        poses_opt_file     <<  keyframes_[i].KeyTime << " " << pose_optimized.x() << " " << pose_optimized.y() << " " << pose_optimized.z()
+        poses_opt_file     <<  timeToNSec(keyframes_[i].KeyTime) << " " << pose_optimized.x() << " " << pose_optimized.y() << " " << pose_optimized.z()
             << " " << q.getX() << " " << q.getY() << " " << q.getZ() << " " << q.getW() << std::endl;
         auto end2 = std::chrono::system_clock::now();
         elapsed_ms += (std::chrono::duration<double,std::milli>(end2 - start2)).count();
@@ -819,11 +848,11 @@ void optimize()
     if (gts_init_vals_.empty() || gts_graph_.empty())
         return;
 
-    std::cout      << "[Optimize]: running isam2 optimization ..." << endl;
-    opt_debug_file << "[Optimize]: running isam2 optimization ..." << endl;
+    std::cout      << "[Optimize]: running isam2 optimization ..." << std::endl;
+    opt_debug_file << "[Optimize]: running isam2 optimization ..." << std::endl;
     auto start1 = std::chrono::system_clock::now();
 //    printGraph(gts_graph_);
-    isam_->backup();         // self-defined isam function, you need to compile gtsam with provided note in Readme
+    isam_->backup();         // Using ISAM2Extended with backup/recover for FPR
 #ifdef marg
     if (!factors_toremove.empty() &&just_loop_closure)
     {
@@ -871,7 +900,7 @@ void optimize()
     {
         opt_debug_file <<  "[FPR]: reject, large residual appear." << std::endl;
 //        opt_debug_file << "origin isam values size = " << isam_->calculateEstimate().size() << std::endl;
-        isam_->recover();    // self-defined isam function, you need to compile gtsam with provided note in Readme
+        isam_->recover();    // Using ISAM2Extended with backup/recover for FPR
 
 //        complete_graph = isam_->getFactorsUnsafe();
 //        opt_debug_file << "aft recovered: " << std::endl;
@@ -921,7 +950,7 @@ else
                                            "cloud_target.pcd", *targetKeyframeCloud_tmp); // scan
             } catch (pcl::PCLException e)
             {
-                ROS_ERROR("%s", e.what());
+                RCLCPP_ERROR(g_node->get_logger(), "%s", e.what());
             }
         }
     }
@@ -982,7 +1011,7 @@ if (multisession_mode == 1)
                                            "cloud_target.pcd", *targetKeyframeCloud_tmp); // scan
             } catch (pcl::PCLException e)
             {
-                ROS_ERROR("%s", e.what());
+                RCLCPP_ERROR(g_node->get_logger(), "%s", e.what());
             }
         }
     }
@@ -1001,7 +1030,7 @@ void insertKPPairConstraint(const pcl::PointCloud<PointType>::Ptr &cloud_tmp, co
         gtsam::Matrix3 R_prev, R_curr;
         gtsam::Vector3 t_prev, t_curr;
 
-        if (keyframes_[prev_idx].KeyTime.toNSec() > jump_time)
+        if (timeToNSec(keyframes_[prev_idx].KeyTime) > jump_time)
             Pose6DToEigenRT(keyframes_[prev_idx].KeyPose, R_prev, t_prev);
         else
         {
@@ -1011,7 +1040,7 @@ void insertKPPairConstraint(const pcl::PointCloud<PointType>::Ptr &cloud_tmp, co
           opt_debug_file <<  " -> " << pose_prev.translation() << std::endl;
           Pose6DToEigenRT(GTSPoseToPose6D(pose_prev), R_prev, t_prev);
         }
-        if (keyframes_[curr_idx].KeyTime.toNSec() > jump_time)
+        if (timeToNSec(keyframes_[curr_idx].KeyTime) > jump_time)
           Pose6DToEigenRT(keyframes_[curr_idx].KeyPose, R_curr, t_curr);
         else
         {
@@ -1147,7 +1176,7 @@ else
         opt_debug_file <<  "[Add Odom Factor]: "  << prev_node_idx << " " << curr_node_idx << " " << std::endl;
         gtsam::Pose3 pose_prev, pose_curr;
 
-        if (keyframes_[prev_node_idx].KeyTime.toNSec() > jump_time)
+        if (timeToNSec(keyframes_[prev_node_idx].KeyTime) > jump_time)
             pose_prev = Pose6DToGTSPose(keyframes_[prev_node_idx].KeyPose);
         else
         {
@@ -1157,7 +1186,7 @@ else
             opt_debug_file <<  " -> " << pose_prev.translation() << std::endl;
         }
 
-        if (keyframes_[curr_node_idx].KeyTime.toNSec() > jump_time)
+        if (timeToNSec(keyframes_[curr_node_idx].KeyTime) > jump_time)
             pose_curr = Pose6DToGTSPose(keyframes_[curr_node_idx].KeyPose);
         else
         {
@@ -1231,15 +1260,15 @@ void main_pgo()
         mtx_sub_.lock();
         {
             // turn raw messages into stuff in a containner
-            while (!odom_buf_.empty() && odom_buf_.front()->header.stamp.toSec() < cloud_buf_.front()->header.stamp.toSec())
+            while (!odom_buf_.empty() && toSec(odom_buf_.front()->header.stamp) < toSec(cloud_buf_.front()->header.stamp))
                 odom_buf_.pop_front();
             if (odom_buf_.empty())
             {
                 mtx_sub_.unlock();
                 continue;
             }
-            if (fabs(odom_buf_.front()->header.stamp.toSec() - cloud_buf_.front()->header.stamp.toSec()) > 1)
-                ROS_WARN_STREAM("Too large odom lidar msg time stamp difference!");
+            if (fabs(toSec(odom_buf_.front()->header.stamp) - toSec(cloud_buf_.front()->header.stamp)) > 1)
+                RCLCPP_WARN(g_node->get_logger(), "Too large odom lidar msg time stamp difference!");
 
             KeyFrame akeyframe;
             auto cloud_buf_front = cloud_buf_.front();
@@ -1258,7 +1287,7 @@ void main_pgo()
             cloud_buf_.pop_front();
             odom_buf_.pop_front();
             opt_debug_file << "[Add Subamp Info]: akeyframe.KeyCloud: " << akeyframe.KeyCloud->size() << std::endl;
-            opt_debug_file << "[Add Subamp Info]: akeyframe.KeyTime: " << akeyframe.KeyTime.toNSec() << std::endl;
+            opt_debug_file << "[Add Subamp Info]: akeyframe.KeyTime: " << timeToNSec(akeyframe.KeyTime) << std::endl;
             opt_debug_file << "[Add Subamp Info]: akeyframe.KeyPose: " << akeyframe.KeyPose.x << " " << akeyframe.KeyPose.y << " " << akeyframe.KeyPose.z << std::endl;
             opt_debug_file << "[Add Subamp Info]: passed_dis: " <<passed_dis;
             opt_debug_file << ", keyframes size(): " << keyframes_.size() << std::endl;
@@ -1277,7 +1306,7 @@ void main_pgo()
                 opt_debug_file << "Detected LC: " << prev_node_idx << " " << curr_node_idx << std::endl;
                 if (curr_node_idx + 1 > keyframes_.size())
                 {
-//                    ROS_WARN_STREAM("Loop clousre factor ahead odom factor!");
+//                    RCLCPP_WARN_STREAM(g_node->get_logger(),("Loop clousre factor ahead odom factor!");
                     opt_debug_file <<  "[Add LC Factor]: Loop clousre factor ahead odom factor!" << std::endl;
                     break;
                 }
@@ -1393,7 +1422,7 @@ if (multisession_mode == 1)
                 // loop closure tri constraint
                 int lc_count = 0;
                 opt_debug_file << "LC KPF queue size is " << LCT_buf_.size() << " now." << std::endl;
-                std::deque<sensor_msgs::PointCloud2ConstPtr> LCT_buf_tmp;
+                std::deque<sensor_msgs::msg::PointCloud2::SharedPtr> LCT_buf_tmp;
                 while (!LCT_buf_.empty())   // iterate over LC KP messgage buffer
                 {
                     auto LCTmsg = LCT_buf_.front();
@@ -1405,7 +1434,7 @@ if (multisession_mode == 1)
                     opt_debug_file <<  "LC KPF queue front: " << prev_idx_lct << " " << curr_idx_lct ;
                     if (curr_idx_lct + 1 > keyframes_.size())
                     {
-//                        ROS_WARN_STREAM("Loop clousre KP factor ahead odom factor!");
+//                        RCLCPP_WARN_STREAM(g_node->get_logger(),("Loop clousre KP factor ahead odom factor!");
                         opt_debug_file <<  "Loop clousre KP factor ahead odom factor!" << std::endl;
                         break;
                     }
@@ -1472,14 +1501,14 @@ else
                 {
                     interT_buf_.pop_front();
                     opt_debug_file <<  "[Add Adjacent KPF]: adjacent KP factor absent! False Positive Rejection might not work due to this." << std::endl;
-//                    ROS_WARN_STREAM("Adjacent KP factor absent! False Positive Rejection might not work due to this.");
+//                    RCLCPP_WARN_STREAM(g_node->get_logger(),("Adjacent KP factor absent! False Positive Rejection might not work due to this.");
                     continue;
                 }
 
                 if (curr_node_idx + 1 > keyframes_.size())
                 {
                     opt_debug_file <<  "[Add Adjacent KPF]: loop clousre factor ahead odom factor!" << std::endl;
-//                    ROS_WARN_STREAM("Adjacent KP factor ahead odom factor!");
+//                    RCLCPP_WARN_STREAM(g_node->get_logger(),("Adjacent KP factor ahead odom factor!");
                     break;
                 }
 #ifndef robust_estimator
@@ -1503,7 +1532,7 @@ else
 //                }
 
 //                if (curr_node_idx + 1 > keyframes_.size()){
-////                    ROS_WARN_STREAM("Adjacent KP 2 factor ahead odom factor!");
+////                    RCLCPP_WARN_STREAM(g_node->get_logger(),("Adjacent KP 2 factor ahead odom factor!");
 //                    opt_debug_file <<  "[Add Adjacent KPF]: loop clousre factor ahead odom factor!" << std::endl;
 //                    break;
 //                }
@@ -1555,7 +1584,7 @@ void pubAndSaveGloablMap(bool savemap = true)
         auto Rt = GTSPoseToEigenM4f(_2T1_);
         Eigen::Matrix3f R = Rt.block<3,3>(0,0);
         Eigen::Vector3f t = Eigen::Vector3f(Rt(0,3), Rt(1,3), Rt(2,3));
-        int pt_skip = max(1, int(pcdsave_step));
+        int pt_skip = std::max(1, int(pcdsave_step));
         for (size_t pidx = 0; pidx < keyframes[node_idx].KeyCloud->points.size(); pidx += pt_skip)
         {
             auto a_pt = keyframes_[node_idx].KeyCloud->points[pidx];
@@ -1568,12 +1597,12 @@ void pubAndSaveGloablMap(bool savemap = true)
     }
     if (fullMapToSave.empty()) return;
     //DownsampleCloud(fullMapToSave, 0.5); // !!!be careful about resolution, too small will cause memory bug or ros message error.
-    sensor_msgs::PointCloud2 laserCloudMapPGOMsg;
+    sensor_msgs::msg::PointCloud2 laserCloudMapPGOMsg;
     pcl::toROSMsg(fullMapToSave, laserCloudMapPGOMsg);
-    laserCloudMapPGOMsg.header.frame_id = "/camera_init";
-    if (pubAndSaveGloablMapAftPGO.getNumSubscribers() != 0)
-        pubAndSaveGloablMapAftPGO.publish(laserCloudMapPGOMsg);
-    ros::spinOnce();
+    laserCloudMapPGOMsg.header.frame_id = "camera_init";
+    if (pubAndSaveGloablMapAftPGO->get_subscription_count() != 0)
+        pubAndSaveGloablMapAftPGO->publish(laserCloudMapPGOMsg);
+    rclcpp::spin_some(g_node);
     loop_corr_counter_last = loop_corr_counter;
 
 //#ifdef save_pcd
@@ -1657,12 +1686,12 @@ void savePrior()                                     // Multisession mode functi
         a_pt.x = akeyframe.KeyPoseOpt.roll; a_pt.y = akeyframe.KeyPoseOpt.pitch; a_pt.z = akeyframe.KeyPoseOpt.yaw;
         fullCorrected_p->push_back(a_pt);
         a_pt.x = akeyframe.KeyPoseOpt.x; a_pt.y = akeyframe.KeyPoseOpt.y; a_pt.z = akeyframe.KeyPoseOpt.z;
-        opt_debug_file << "KF pose corrected: " << a_pt.x << " " << a_pt.y << " " << a_pt.z << endl;
+        opt_debug_file << "KF pose corrected: " << a_pt.x << " " << a_pt.y << " " << a_pt.z << std::endl;
         fullCorrected_p->push_back(a_pt);
         a_pt.x = akeyframe.KeyPose.roll; a_pt.y = akeyframe.KeyPose.pitch; a_pt.z = akeyframe.KeyPose.yaw;
         fullCorrected_p->push_back(a_pt);
         a_pt.x = akeyframe.KeyPose.x; a_pt.y = akeyframe.KeyPose.y; a_pt.z = akeyframe.KeyPose.z;
-        opt_debug_file << "KF pose original: " << a_pt.x << " " << a_pt.y << " " << a_pt.z << endl;
+        opt_debug_file << "KF pose original: " << a_pt.x << " " << a_pt.y << " " << a_pt.z << std::endl;
 
         fullCorrected_p->push_back(a_pt);
         std::cout      << "[SavePrior]: prepare key frame: "  << i << std::endl;
@@ -1695,18 +1724,18 @@ void savePrior()                                     // Multisession mode functi
 }
 
 #ifdef as_node
-int mainOptimizationFunction()
+int mainOptimizationFunction(rclcpp::Node::SharedPtr node)
 {
-    int argc; char** argv;
-    ros::init(argc, argv, "loop_optimization");
+    g_node = node;
 #else
 int main(int argc, char **argv)
 {
-    ros::init(argc, argv, "loop_optimization");
+    rclcpp::init(argc, argv);
+    auto node = std::make_shared<rclcpp::Node>("loop_optimization");
+    g_node = node;
 #endif
-    ROS_INFO("Loop Correction Node Starts");
-    ros::NodeHandle nh;
-    bool config_loaded = loadConfig(nh);
+    RCLCPP_INFO(node->get_logger(), "Loop Correction Node Starts");
+    bool config_loaded = loadConfig(node);
     if (!config_loaded) return 0;
 
     poses_opt_fname = save_directory + "optimized_poses.txt";
@@ -1740,26 +1769,34 @@ int main(int argc, char **argv)
     poses_raw_file.precision(std::numeric_limits<double>::max_digits10);
 //    poses_opt_all_file.precision(std::numeric_limits<double>::max_digits10);
 
-    ros::Subscriber sub_cloud = nh.subscribe<sensor_msgs::PointCloud2>("/clouds_submap", 100, cloudCallback);
-    ros::Subscriber sub_odom = nh.subscribe<nav_msgs::Odometry>("/submap_pose", 100, odometryCallback);
-    ros::Subscriber sub_interT = nh.subscribe<sensor_msgs::PointCloud2>("/inter_triangles", 100, interKPPairCallback);
-    ros::Subscriber sub_interT2 = nh.subscribe<sensor_msgs::PointCloud2>("/inter2_triangles", 100, inter2KPPairCallback);
-    ros::Subscriber sub_lcT = nh.subscribe<sensor_msgs::PointCloud2>("/lc_triangles", 100, loopClosureKPPairCallback);
-    ros::Subscriber sub_loopclosure = nh.subscribe<geometry_msgs::PoseWithCovariance>("/loop_closure_tranformation", 100, loopClosureCallback);
-    ros::Subscriber sub_notification = nh.subscribe<std_msgs::Float64MultiArray>("/odom_correction_info64", 100, notificationCallback);
-    ros::Subscriber sub_timeCorrection = nh.subscribe<std_msgs::UInt64>("/time_correction", 100, jumptimeCallback);
+    auto sub_cloud = node->create_subscription<sensor_msgs::msg::PointCloud2>(
+        "/clouds_submap", 100, cloudCallback);
+    auto sub_odom = node->create_subscription<nav_msgs::msg::Odometry>(
+        "/submap_pose", 100, odometryCallback);
+    auto sub_interT = node->create_subscription<sensor_msgs::msg::PointCloud2>(
+        "/inter_triangles", 100, interKPPairCallback);
+    auto sub_interT2 = node->create_subscription<sensor_msgs::msg::PointCloud2>(
+        "/inter2_triangles", 100, inter2KPPairCallback);
+    auto sub_lcT = node->create_subscription<sensor_msgs::msg::PointCloud2>(
+        "/lc_triangles", 100, loopClosureKPPairCallback);
+    auto sub_loopclosure = node->create_subscription<geometry_msgs::msg::PoseWithCovariance>(
+        "/loop_closure_tranformation", 100, loopClosureCallback);
+    auto sub_notification = node->create_subscription<std_msgs::msg::Float64MultiArray>(
+        "/odom_correction_info64", 100, notificationCallback);
+    auto sub_timeCorrection = node->create_subscription<std_msgs::msg::UInt64>(
+        "/time_correction", 100, jumptimeCallback);
 
-    pubOdomAftPGO = nh.advertise<nav_msgs::Odometry>("/aft_pgo_odom", 100);
-    pubPathAftPGO = nh.advertise<nav_msgs::Path>("/aft_pgo_path", 100);
-    pubPathAftPGOPrior = nh.advertise<nav_msgs::Path>("/aft_pgo_path_prior", 100);
-    pubAndSaveGloablMapAftPGO = nh.advertise<sensor_msgs::PointCloud2>("/aft_pgo_map", 100);
-    pubLoopClosure = nh.advertise<visualization_msgs::Marker>("/loopclosure", 100);
+    pubOdomAftPGO = node->create_publisher<nav_msgs::msg::Odometry>("/aft_pgo_odom", 100);
+    pubPathAftPGO = node->create_publisher<nav_msgs::msg::Path>("/aft_pgo_path", 100);
+    pubPathAftPGOPrior = node->create_publisher<nav_msgs::msg::Path>("/aft_pgo_path_prior", 100);
+    pubAndSaveGloablMapAftPGO = node->create_publisher<sensor_msgs::msg::PointCloud2>("/aft_pgo_map", 100);
+    pubLoopClosure = node->create_publisher<visualization_msgs::msg::Marker>("/loopclosure", 100);
 
     parameters.relinearizeThreshold = 0.1;
     parameters.relinearizeSkip = 1;
     parameters.enableDetailedResults = true;
 //    parameters.factorization = gtsam::ISAM2Params::QR; // This is setting make isam->update() robust but increase opt time cost
-    isam_ = new gtsam::ISAM2(parameters);
+    isam_ = new gtsam::ISAM2Extended(parameters);
 
     gtsam::Vector noise_vec6(6);
     noise_vec6 << 1e-12, 1e-12, 1e-12, 1e-12, 1e-12, 1e-12;
@@ -1771,40 +1808,47 @@ if (multisession_mode == 1)
 //    residual_thr = 5.0;
     loadPriorMapAndPoses();
 }
+    // Declare runtime parameters
+    node->declare_parameter<bool>("save_prior_info", false);
+    node->declare_parameter<bool>("save_map", false);
+    node->declare_parameter<bool>("pub_pgopath", false);
+
     std::thread pose_graph_optimization {main_pgo};
     std::thread map_viz {processRvizMap};
 
-    ros::Rate rate(5000);
-    while(ros::ok())
+    rclcpp::Rate rate(5000);
+    while(rclcpp::ok())
     {
         rate.sleep();
-        ros::spinOnce();
+        rclcpp::spin_some(node);
         bool save_one_time = false;
 if (multisession_mode == 2)
 {
-        nh.getParam("/save_prior_info", save_one_time); // you can do [$rosparam set /save_prior_info true] on terminal to
-                                                        // manually save prior info for future session
+        save_one_time = node->get_parameter("save_prior_info").as_bool();
+        // you can use ros2 param set to manually save prior info for future session
         if(save_one_time)
         {
-            nh.setParam("/save_prior_info", false);
+            node->set_parameter(rclcpp::Parameter("save_prior_info", false));
             save_one_time = false;
             mtx_keyf_read_.lock();
             savePrior();
             mtx_keyf_read_.unlock();
         }
 }
-        nh.getParam("/save_map", save_one_time);    // you can do [$rosparam set /save_map true] on terminal to manually save map
+        save_one_time = node->get_parameter("save_map").as_bool();
+        // you can use ros2 param set to manually save map
         if(save_one_time)
         {
-            nh.setParam("/save_map", false);
+            node->set_parameter(rclcpp::Parameter("save_map", false));
             save_one_time = false;
             pubAndSaveGloablMap();
         }
 
-        nh.getParam("/pub_pgopath", save_one_time);    // you can do [$rosparam set /pub_final_pgopath true] on terminal to manually save map
+        save_one_time = node->get_parameter("pub_pgopath").as_bool();
+        // you can use ros2 param set to manually publish pgo path
         if(save_one_time)
         {
-            nh.setParam("/pub_pgopath", false);
+            node->set_parameter(rclcpp::Parameter("pub_pgopath", false));
             save_one_time = false;
             pubPath();
         }
@@ -1820,5 +1864,8 @@ if (multisession_mode == 2)
     //poses_opt_all_file.close();
     times_opt_file.close();
     opt_debug_file.close();
+#ifndef as_node
+    rclcpp::shutdown();
+#endif
     return 0;
 }

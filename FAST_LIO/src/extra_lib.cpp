@@ -1,28 +1,31 @@
 #include "extra_lib.h"
+#include <tf2/LinearMath/Quaternion.h>
+#include <tf2/LinearMath/Matrix3x3.h>
 
 namespace ExtraLib {
 
 PointVector id_vec;
-void pubCorrectionIds(const ros::Publisher &pub_handle, const V3D &pos, const int id){
-  visualization_msgs::MarkerArray text_msg;
-  visualization_msgs::Marker a_text;
-  a_text.header.stamp = ros::Time::now();
+void pubCorrectionIds(const rclcpp::Publisher<visualization_msgs::msg::MarkerArray>::SharedPtr &pub_handle,
+                      const rclcpp::Clock::SharedPtr &clock, const V3D &pos, const int id){
+  visualization_msgs::msg::MarkerArray text_msg;
+  visualization_msgs::msg::Marker a_text;
+  a_text.header.stamp = clock->now();
   a_text.header.frame_id = "camera_init";
   a_text.ns = "correction_ids";
-  a_text.action = visualization_msgs::Marker::ADD;
+  a_text.action = visualization_msgs::msg::Marker::ADD;
   a_text.pose.orientation.w = 1.0;
-  a_text.type = visualization_msgs::Marker::TEXT_VIEW_FACING;
+  a_text.type = visualization_msgs::msg::Marker::TEXT_VIEW_FACING;
   a_text.scale.z = 7;
   PointType apt;
   apt.x = pos[0], apt.y = pos[1], apt.z = pos[2], apt.intensity = id;
   id_vec.push_back(apt);
 
-  for (int i = 0; i < id_vec.size(); i++){
-    a_text.id = i;
+  for (size_t i = 0; i < id_vec.size(); i++){
+    a_text.id = static_cast<int>(i);
     a_text.color.g = 1.0f;
     a_text.color.r = 1.0f;
     a_text.color.a = 1.0f;
-    geometry_msgs::Pose pose;
+    geometry_msgs::msg::Pose pose;
     pose.position.x = id_vec[i].x;
     pose.position.y = id_vec[i].y;
     pose.position.z = id_vec[i].z;
@@ -31,7 +34,7 @@ void pubCorrectionIds(const ros::Publisher &pub_handle, const V3D &pos, const in
     text_msg.markers.push_back(a_text);
   }
 
-  pub_handle.publish(text_msg);
+  pub_handle->publish(text_msg);
 }
 
 bool GetOneLineAndSplitByComma(std::istream& fptr, std::vector<std::string> &out_str)
@@ -124,7 +127,7 @@ V3D esti_center(const PointVector &point_near){
   return out;
 }
 
-void eigenRtToPoseMsg(const M3D &R, const V3D &t, geometry_msgs::Pose &out){
+void eigenRtToPoseMsg(const M3D &R, const V3D &t, geometry_msgs::msg::Pose &out){
   out.position.x = t[0];
   out.position.y = t[1];
   out.position.z = t[2];
@@ -157,7 +160,7 @@ M3D quatToRotM(double w, double x, double y, double z){
   return R;
 }
 
-void poseMsgToEigenRT(const geometry_msgs::Pose &m, M3D &R, V3D &t){
+void poseMsgToEigenRT(const geometry_msgs::msg::Pose &m, M3D &R, V3D &t){
   t = V3D(m.position.x, m.position.y, m.position.z);
   Eigen::Quaterniond q(m.orientation.w, m.orientation.x,\
                        m.orientation.y, m.orientation.z);
@@ -165,11 +168,11 @@ void poseMsgToEigenRT(const geometry_msgs::Pose &m, M3D &R, V3D &t){
 //  R = quatToRotM(m.orientation.w, m.orientation.x, m.orientation.y, m.orientation.z);
 }
 
-V3D geometryOrientationToRPY(const geometry_msgs::Quaternion pose_in){
-  tf::Quaternion q_tmp(pose_in.x, pose_in.y, \
+V3D geometryOrientationToRPY(const geometry_msgs::msg::Quaternion &pose_in){
+  tf2::Quaternion q_tmp(pose_in.x, pose_in.y, \
                        pose_in.z, pose_in.w);
   double roll, pitch, yaw;
-  tf::Matrix3x3(q_tmp).getRPY(roll, pitch, yaw);
+  tf2::Matrix3x3(q_tmp).getRPY(roll, pitch, yaw);
   return V3D(roll, pitch, yaw);
 }
 
